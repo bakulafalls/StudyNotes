@@ -1,0 +1,146 @@
+课程翻译：https://mit-public-courses-cn-translatio.gitbook.io/mit6-s081
+xv6文档：https://pdos.csail.mit.edu/6.828/2020/xv6/book-riscv-rev1.pdf
+
+**本文档用于记录学习过程中的关键点**
+
+# Lec01 Introduction and examples
+## 1.2 操作系统结构
+![Alt text](./image/MIT6.S081/image.jpg)
+* 一个操作系统只有一个kernel，用于管理每一个用户空间进程
+* 系统调用与程序中的函数调用看起来是一样的，但区别是系统调用会实际运行到系统内核中，并执行内核中对于系统调用的实现。
+
+## 1.5 read, write, exit系统调用
+
+* **文件描述符**：0，1，2对应标准输入、标准输出和标准错误流
+
+* read接收3个参数：
+
+1. 第一个参数是文件描述符，指向一个之前打开的文件。Shell会确保默认情况下，当一个程序启动时，文件描述符0连接到console的输入，文件描述符1连接到了console的输出。所以我可以通过这个程序看到console打印我的输入。当然，这里的程序会预期文件描述符已经被Shell打开并设置好。
+
+1. read的第二个参数是指向某段内存的指针，程序可以通过指针对应的地址读取内存中的数据，这里的指针就是代码中的buf参数。在代码第10行，程序在栈里面申请了64字节的内存，并将指针保存在buf中，这样read可以将数据保存在这64字节中。
+
+1. read的第三个参数是代码想读取的最大长度，sizeof(buf)表示，最多读取64字节的数据，所以这里的read最多只能从连接到文件描述符0的设备，也就是console中，读取64字节的数据。
+
+## 1.6 open系统调用
+```c
+int fd = open("output.txt", 0_WRONLY|0_CREATE);
+write(fd, "ooo/n", 4);
+```
+* open系统调用会返回一个新分配的文件描述符，这里的文件描述符是一个小的数字，可能是2，3，4或者其他的数字。
+* write的第二个参数是数据的指针，第三个参数是要写入的字节数
+* **文件描述符**本质上对应了内核中的一个表单数据。内核维护了每个运行进程的状态，内核会为每一个运行进程保存一个表单，表单的key是文件描述符。这个表单让内核知道，每个文件描述符对应的实际内容是什么。这里比较关键的点是，每个进程都有自己独立的文件描述符空间，所以如果运行了两个不同的程序，对应两个不同的进程，如果它们都打开一个文件，它们或许可以得到相同数字的文件描述符，但是因为内核为每个进程都维护了一个独立的文件描述符空间，这里相同数字的文件描述符可能会对应到不同的文件。
+
+## 1.7 Shell
+Q:有一个系统调用和编译器的问题。编译器如何处理系统调用？生成的汇编语言是不是会调用一些由操作系统定义的代码段？
+A:有一个特殊的RISC-V指令，程序可以调用这个指令，并将控制权交给内核。所以，实际上当你运行C语言并执行例如open或者write的系统调用时，**从技术上来说，open是一个C函数，但是这个函数内的指令实际上是机器指令**，也就是说我们调用的open函数并不是一个C语言函数，它是**由汇编语言实现**，组成这个系统调用的汇编语言实际上在RISC-V中被称为ecall。这个特殊的指令将控制权转给内核。之后内核检查进程的内存和寄存器，并确定相应的参数。
+
+## 1.8 fork系统调用 
+```c {.line-numbers} 
+//////////////////////////////////
+//  fork.c: create a new process
+
+#include "kernel/types.h"
+#include "user/user.h"
+
+int
+main()
+{
+    int pid;
+
+    pid = fork();  // 子父进程各返回一个pid
+
+    printf("fork() returned %d\n", pid);  // 子父进程同时执行 
+
+    if (pid == 0){ // pid=0, 为子进程
+        printf("child\n");
+    } else {  // 父进程
+        printf("parent\n");
+    }
+
+    exit(0);
+}
+```
+* fork会拷贝当前进程的内存，并创建一个新的进程，这里的内存包含了进程的指令和数据。**同时也会拷贝文件描述符的表单！**
+* fork在原始的进程中会返回大于0的整数，这个是新创建进程的ID。而在新创建的进程中，fork系统调用会返回0。
+
+##  1.9 exec, wait系统调用
+```c
+char *argv[] = { "echo", "this", "is", "redirected", "echo", 0 };  // 0作为一个NULL指针告诉内核数组结束了
+exec("echo", argv);
+printf("exec failed!\n");
+exit(0);
+```
+* ```exec("echo", argv);```操作系统从名为echo的文件中加载指令到当前的进程中，并替换了当前进程的内存，之后开始执行这些新加载的指令。同时，可以传入命令行参数,在这里就是设置好的一个字符指针的数组argv，这里的字符指针本质就是一个字符串（string）。
+* exec系统调用会**保留当前的文件描述符表单**。所以任何在exec系统调用之前的文件描述符，例如0，1，2等。它们在新的程序中表示相同的东西。
+*  通常来说exec系统调用**不会返回**，因为exec会完全替换当前进程的内存，相当于当前进程不复存在了，所以exec系统调用已经没有地方能返回了。它只会在kernel不能运行相应的文件时返回。
+```c {.line-numbers}
+//////////////////////////////
+#include "kernel/types.h"
+#include "user/user.h"
+
+// forkexec.c: fork then exec
+
+int
+main()
+{
+    int pid. status;
+
+    pid = fork();
+    if(pid == 0){
+        char *argv[] = { "echo", "this", "is", "redirected", "echo", 0 }; 
+        exec("echo", argv);   // echo执行完后退出，之后父进程重新获得对子进程的控制（相当于自动执行exit(0);)
+        printf("exec failed!\n");   // 如果exec未能成功执行，执行第16,17行
+        exit(1);
+    } else {
+        printf("parent waiting\n");
+        wait(&status);  // 操作系统会将1从退出的子进程传递到此处
+        printf("the chiled exited with status %d\n", status);
+    }
+
+    exit(0);
+}
+```
+输出：
+![Alt text](./image/MIT6.S081/forkexec.png)
+* wait会等待之前创建的子进程退出，wait的参数status，是一种让退出的子进程以一个整数（32bit的数据）的格式与等待的父进程通信方式。
+* 对于Unix系统，如果一个程序成功的退出了，那么exit的参数会是0
+* ```&status```，是将status对应的地址传递给内核，内核会向这个地址写入子进程向exit传入的参数(1或0)。
+* Q: 当我们说子进程从父进程拷贝了所有的内存，这里具体指的是什么呢？是不是说子进程需要重新定义变量之类的？
+A： 在编译之后，你的C程序就是一些在内存中的指令，这些指令存在于内存中。所以这些指令可以被拷贝，因为它们就是内存中的字节，它们可以被拷贝到别处。通过一些有关虚拟内存的技巧，可以使得子进程的内存与父进程的内存一样，这里实际就是将父进程的内存镜像拷贝给子进程，并在子进程中执行。
+* Q：如果父进程有多个子进程，wait是不是会在第一个子进程完成时就退出？这样的话，还有一些与父进程交错运行的子进程，是不是需要有多个wait来确保所有的子进程都完成？
+A: 是的，如果一个进程调用fork两次，如果它想要等两个子进程都退出，它需要调用wait两次。每个wait会在一个子进程退出时立即返回。当wait返回时，你实际上没有必要知道哪个子进程退出了，但是wait返回了子进程的进程号，所以在wait返回之后，你就可以知道是哪个子进程退出了。
+
+## 1.10 I/O Redirect
+```c {.line-numbers}
+// redirect.c: run a command with output redirected
+
+int
+main()
+{
+	int pid;
+
+	pid = fork();
+	if (pid == 0) {
+		close(1);  // 子进程关闭文件描述符为1的标准输出流。
+		open("output.txt", 0_WRONLY|0_CREATE);   // O_WRONLY 表示写入方式，O_CREATE 表示如果文件不存在则创建
+
+		char *argv[] = { "echo", "this", "is", "redirected", "echo", 0 };
+		exec("echo", argv);
+		printf("exec failed!\n");
+		exit(1);
+	} else {
+		wait((int *) 0);
+	}
+
+	exit(0);
+}
+```
+Shell:
+```c
+$ redirect
+$  // no output
+$ cat output.txt
+this is redirected echo
+```
+* 代码第11行的open一定会返回1，因为**open会返回当前进程未使用的最小文件描述符序号**。因为我们刚刚关闭了文件描述符1，而文件描述符0还对应着console的输入，所以open一定可以返回1。在代码第16行之后，文件描述符1与文件output.txt关联。
+* 执行```exec(echo)```时，echo会输出到文件描述符1，也就是文件output.txt。这里有意思的地方是，echo根本不知道发生了什么，**echo**也没有必要知道I/O重定向了，它**只是将自己的输出写到了文件描述符1**。只有Shell知道I/O重定向了
