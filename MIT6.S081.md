@@ -1,3 +1,4 @@
+课程官网：https://pdos.csail.mit.edu/6.828/2020/xv6.html
 课程翻译：https://mit-public-courses-cn-translatio.gitbook.io/mit6-s081
 xv6文档：https://pdos.csail.mit.edu/6.828/2020/xv6/book-riscv-rev1.pdf
 
@@ -144,3 +145,64 @@ this is redirected echo
 ```
 * 代码第11行的open一定会返回1，因为**open会返回当前进程未使用的最小文件描述符序号**。因为我们刚刚关闭了文件描述符1，而文件描述符0还对应着console的输入，所以open一定可以返回1。在代码第16行之后，文件描述符1与文件output.txt关联。
 * 执行```exec(echo)```时，echo会输出到文件描述符1，也就是文件output.txt。这里有意思的地方是，echo根本不知道发生了什么，**echo**也没有必要知道I/O重定向了，它**只是将自己的输出写到了文件描述符1**。只有Shell知道I/O重定向了
+
+## 补充：pipe, list
+```c {.line-numbers}
+// pipe1.c: communication over a pipe
+
+#include "kernel/types.h"
+#include "user/user.h"
+
+int
+main()
+{
+  int fds[2];
+  char buf[100];
+  int n;
+
+  // create a pipe, with two FDs in fds[0], fds[1].
+  pipe(fds);
+
+  write(fds[1], "this is pipe1\n", 14);   // 向管道的写端写入14个字节的数据,即字符串"this is pipe1\n"
+  n = read(fds[0], buf, sizeof(buf));  // 从管道的读端读取数据，最多读取sizeof(buf)（即100）个字节，并将数据存储在缓冲区buf中。函数返回实际读取到的字节数，并将其存储在变量n中。
+
+  write(1, buf, n);  // 将读取到的数据写到标准输出（文件描述符1），输出的字节数为n
+
+  exit(0);
+}
+```
+* 管道本质上是一个在内存中开辟的缓冲区，它连接了两个文件描述符：**第一个用于读取，第二个用于写入**。
+* ```int pipe(int pipefd[2]);``` 参数：```pipefd[0]```将成为读端的文件描述符，```pipefd[1]```将成为写端的文件描述符（操作系统会自动找到当前可用的最小的两个未使用的文件描述符）
+*  ```pipe()```成功时返回值为0，失败时返回值为-1，并设置errno以指示错误类型
+
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "user/user.h"
+
+// pipe2.c: communication between two processes
+
+int
+main()
+{
+  int n, pid;
+  int fds[2];
+  char buf[100];
+
+  // create a pipe, with two FDs in fds[0], fds[1].
+  pipe(fds);
+
+  pid = fork();
+  if (pid == 0) {
+    write(fds[1], "this is pipe2\n", 14);
+  } else {
+    n = read(fds[0], buf, sizeof(buf));
+    write(1, buf, n);
+  }
+
+  exit(0);
+}
+```
+* 上面代码演示了pipe在两个进程之间进行通信
+```c {.line-numbers}
+
+```
