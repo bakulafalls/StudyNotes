@@ -204,5 +204,155 @@ main()
 ```
 * 上面代码演示了pipe在两个进程之间进行通信
 ```c {.line-numbers}
+#include "kernel/types.h"
+#include "user/user.h"
+
+// list.c: list file names in the current directory
+
+struct dirent {
+  ushort inum;
+  char name[14];
+};  // 定义了一个结构体 dirent，用于表示目录项（directory entry）。每个目录项包含一个 inum 字段表示索引节点号（inode number），以及一个长度为 14 的字符数组 name 表示文件名。
+
+int
+main()
+{
+  int fd;  // 用于存储打开目录的文件描述符
+  struct dirent e;  // 用于存储读取到的目录项
+
+  fd = open(".", 0);
+  while(read(fd, &e, sizeof(e)) == sizeof(e)){
+    if(e.name[0] != '\0'){
+      printf("%s\n", e.name);
+    }
+  }
+  exit(0);
+}
 
 ```
+# 版本控制
+## 1.  配置Linux系统HOSTS（针对虚拟机无法访问github,443错误）
+1.1 打开hosts文件
+```
+sudo gedit /etc/hosts
+```
+1.2 将下面文本添加至hosts文件末尾
+```
+#github
+140.82.114.4 github.com
+151.101.1.6 github.global.ssl.fastly.net
+151.101.65.6 github.global.ssl.fastly.net
+151.101.129.6 github.global.ssl.fastly.net
+151.101.193.6 github.global.ssl.fastly.net
+```
+1.3 保存并关闭文件，断开虚拟机网络然后重新连接即可
+
+## 2. 配置Linux系统SSH（针对用https clone 远程仓库后每次push需要输密码/密码错误）
+2.1 在Linux系统中生成ECDSA密钥的（*rsa密钥由于安全性问题已被github停用*）
+```
+//执行命令之后需要连续按3次回车键
+//生成的公私钥github_id_ecdsa.pub与github_id_ecdsa文件位于root\.ssh目录下
+ssh-keygen -t ecdsa -b 521 -C "450969657@qq.com"  -f ~/.ssh/github_id_ecdsa 
+```
+2.2 获取公钥内容
+```
+cd ~/.ssh
+cat github_id_ecdsa.pub
+```
+复制保存其中的内容
+2.3 将SSH key添加到ssh-agent **(须在项目文件夹中也运行一遍！)**
+启动ssh-agent
+```
+$ eval "$(ssh-agent -s)"
+> Agent pid 99360
+```
+添加SSH密钥到ssh-agent
+```
+ssh-add ~/.ssh/github_id_ecdsa 
+> Identity added: /root/.ssh/github_id_ecdsa (/root/.ssh/github_id_ecdsa)
+```
+2.4 添加SSHkey到github账户
+复制1.2中内容到网页端的个人账户设置里
+
+2.5 测试
+```
+ssh -T git@github.com
+> Hi bakulafalls! You've successfully authenticated, but GitHub does not provide shell access.
+```
+
+## 3. 拉取实验代码，推送
+3.1 首先将mit的实验代码克隆到本地
+```git clone git://g.csail.mit.edu/xv6-labs-2020```
+3.2 在github创建一个新的空仓库
+![Alt text](./image/MIT6.S081/image.png)
+3.3 添加git仓库地址
+查看 本地仓库git配置文件
+```
+cd xv6-labs-2020/
+cat .git/config
+> [core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[remote "origin"]
+	url = git://g.csail.mit.edu/xv6-labs-2020
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "master"]
+	remote = origin
+	merge = refs/heads/master
+[branch "util"]
+	remote = origin
+	merge = refs/heads/util
+```
+添加自己的github仓库地址
+```
+git remote add github git@github.com:bakulafalls/xv6-labs-2020.git
+cat .git/config
+>  [core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[remote "origin"]
+	url = git://g.csail.mit.edu/xv6-labs-2020
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "master"]
+	remote = origin
+	merge = refs/heads/master
+[branch "util"]
+	remote = origin
+	merge = refs/heads/util
+[remote "github"]
+	url = git@github.com:bakulafalls/xv6-labs-2020.git
+	fetch = +refs/heads/*:refs/remotes/github/*
+```
+3.4 在项目目录下进行一遍2.3的操作
+
+3.5 将实验代码推送github仓库
+```c
+// 将实验1用到的util分支推送到github
+git checkout util
+git push github util:util
+```
+3.6 建议每个实验创建一个测试分支，例如对于util来说
+```c
+git checkout util         // 切换到util分支
+git checkout -b util_test // 建立并切换到util的测试分支
+```
+当在***util_test***分支中每测试通过一个作业，请提交（```git commit```）代码，并将所做的修改合并（```git merge```）到util中，然后提交（```git push```）到github
+```c
+git add .
+git commit -m "完成了第一个作业"
+git checkout util
+git merge util_test
+git push github util:util
+```
+
+# Lab1: Xv6 and Unix utilities
+**Task1: Launch xv6**
+参考网站：[课程官方实验部署指南](https://pdos.csail.mit.edu/6.828/2018/tools.html)， [CENTOS7部署经验](https://blog.csdn.net/weixin_46803360/article/details/128116051?ops_request_misc=&request_id=&biz_id=102&utm_term=CENTOSMIT6.828&utm_medium=distribute.pc_search_result.none-task-blog-2~all~sobaiduweb~default-0-128116051.142^v100^pc_search_result_base1&spm=1018.2226.3001.4187)， [Ubuntu部署经验](https://blog.csdn.net/u013573243/article/details/129403949?ops_request_misc=%257B%2522request%255Fid%2522%253A%2522171627969616800197084566%2522%252C%2522scm%2522%253A%252220140713.130102334.pc%255Fall.%2522%257D&request_id=171627969616800197084566&biz_id=0&utm_medium=distribute.pc_search_result.none-task-blog-2~all~first_rank_ecpm_v1~rank_v31_ecpm-3-129403949-null-null.142^v100^pc_search_result_base1&utm_term=Error%3A%20Couldnt%20find%20a%20riscv64%20version%20of%20GCC%2Fbinutils.%20***%20To%20turn%20off%20this%20error%2C%20run%20gmake%20TOOLPREFIX%3D%20....&spm=1018.2226.3001.4187)
+自用环境：CentOS7(VMware) + https://github.com/mit-pdos/xv6-public
+实验用：```$ git clone git://g.csail.mit.edu/xv6-labs-2020```
+编译错误：
+![Alt text](./image/MIT6.S081/bug1.png)
