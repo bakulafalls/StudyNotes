@@ -350,9 +350,89 @@ git push github util:util
 ```
 
 # Lab1: Xv6 and Unix utilities
-**Task1: Launch xv6**
+## **Task1: Launch xv6**
 参考网站：[课程官方实验部署指南](https://pdos.csail.mit.edu/6.828/2018/tools.html)， [CENTOS7部署经验](https://blog.csdn.net/weixin_46803360/article/details/128116051?ops_request_misc=&request_id=&biz_id=102&utm_term=CENTOSMIT6.828&utm_medium=distribute.pc_search_result.none-task-blog-2~all~sobaiduweb~default-0-128116051.142^v100^pc_search_result_base1&spm=1018.2226.3001.4187)， [Ubuntu部署经验](https://blog.csdn.net/u013573243/article/details/129403949?ops_request_misc=%257B%2522request%255Fid%2522%253A%2522171627969616800197084566%2522%252C%2522scm%2522%253A%252220140713.130102334.pc%255Fall.%2522%257D&request_id=171627969616800197084566&biz_id=0&utm_medium=distribute.pc_search_result.none-task-blog-2~all~first_rank_ecpm_v1~rank_v31_ecpm-3-129403949-null-null.142^v100^pc_search_result_base1&utm_term=Error%3A%20Couldnt%20find%20a%20riscv64%20version%20of%20GCC%2Fbinutils.%20***%20To%20turn%20off%20this%20error%2C%20run%20gmake%20TOOLPREFIX%3D%20....&spm=1018.2226.3001.4187)
 自用环境：CentOS7(VMware) + https://github.com/mit-pdos/xv6-public
 实验用：```$ git clone git://g.csail.mit.edu/xv6-labs-2020```
-编译错误：
-![Alt text](./image/MIT6.S081/bug1.png)
+**编译错误：**
+1. ![Alt text](./image/MIT6.S081/bug1.png)
+1. install riscv tool-gnu-toolchain 时，make时之前添加的PATH中的环境变量不在了，需重新在控制台输入
+```
+# source ~/.bash_profile
+# echo $PATH
+> /usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:/root/bin:/root/bin:/opt/riscv/bin
+```
+或者在.bashrc中设置环境变量
+
+**clone 错误：**
+```
+error: RPC failed; result=18, HTTP code = 20000 KiB/s   
+fatal: The remote end hung up unexpectedly
+fatal: 过早的文件结束符（EOF）
+fatal: index-pack failed
+```
+解决方法：
+  ```
+  git config --global http.postBuffer 524288000
+  ```
+
+  **toolchain make 错误：**
+ 1. ``` log2’不是‘std’的成员```原因是Linux系统中C标准库版本过低
+[解决方法](https://blog.csdn.net/m0_43453853/article/details/109381488?ops_request_misc=%257B%2522request%255Fid%2522%253A%2522171634022916800184171915%2522%252C%2522scm%2522%253A%252220140713.130102334.pc%255Fall.%2522%257D&request_id=171634022916800184171915&biz_id=0&utm_medium=distribute.pc_search_result.none-task-blog-2~all~first_rank_ecpm_v1~rank_v31_ecpm-4-109381488-null-null.142^v100^pc_search_result_base1&utm_term=make%20%E6%8A%A5%E9%94%99Log2%E4%B8%8D%E6%98%AFstd%E7%9A%84%E6%88%90%E5%91%98&spm=1018.2226.3001.4187)
+1. 
+```
+g++: fatal error: 已杀死 signal terminated program cc1plus
+compilation terminated.
+```
+原因：内存不足
+尝试在VMware中将内存设为8G
+
+**xv6-labs-2020 make 错误：**
+1. 
+```
+user/sh.c: In function 'runcmd':
+user/sh.c:58:1: error: infinite recursion detected []8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Winfinite-recursion-Werror=infinite-recursion]8;;]
+```
+参照[记录MIT6.s081 编译QEMU中的错误](https://blog.csdn.net/weixin_51472360/article/details/128800041),修改user/sh.c:58处，添加__attribute__((noreturn))
+```c {.line-numbers}
+diff --git a/user/sh.c b/user/sh.c
+index 83dd513..c96dab0 100644
+--- a/user/sh.c
++++ b/user/sh.c
+@@ -54,6 +54,7 @@ void panic(char*);
+ struct cmd *parsecmd(char*);
+ 
+ // Execute cmd.  Never returns.
++__attribute__((noreturn))
+ void
+ runcmd(struct cmd *cmd)
+ {
+```
+2. make: qemu-system-riscv64：命令未找到
+新版的实验代码是在riscv上编译的，所以对应的qemu也需要安装riscv版本
+[方法参考](https://stackoverflow.com/questions/66718225/qemu-system-riscv64-is-not-found-in-package-qemu-system-misc)
+
+![Alt text](./image/MIT6.S081/22cac1d518fb42380afc55cd34078a5.png)
+启动成功
+
+## Task2 Sleep
+<span style="background-color: yellow;">实现xv6的UNIX程序```sleep```：您的```sleep```应该暂停到用户指定的计时数。一个滴答(tick)是由xv6内核定义的时间概念，即来自定时器芯片的两个中断之间的时间。您的解决方案应该在文件***user/sleep.c***中。</span>
+
+**提示：**
+* 在你开始编码之前，请阅读《book-riscv-rev1》的第一章
+
+* 看看其他的一些程序（如 ***/user/echo.c, /user/grep.c, /user/rm.c***）查看如何获取传递给程序的命令行参数
+
+* 如果用户忘记传递参数，```sleep```应该打印一条错误信息
+
+* 命令行参数作为字符串传递; 您可以使用```atoi```将其转换为数字（详见 ***/user/ulib.c***）
+
+* 使用系统调用```sleep```
+
+* 请参阅kernel/sysproc.c以获取实现```sleep```系统调用的xv6内核代码（查找```sys_sleep```），***user/user.h***提供了```sleep```的声明以便其他程序调用，用汇编程序编写的***user/usys.S***可以帮助```sleep```从用户区跳转到内核区。
+
+* 确保```main```函数调用```exit()```以退出程序。
+
+* 将你的```sleep```程序添加到***Makefile***中的```UPROGS```中；完成之后，```make qemu```将编译您的程序，并且您可以从xv6的shell运行它。
+
+* 看看Kernighan和Ritchie编著的《C程序设计语言》（第二版）来了解C语言。
