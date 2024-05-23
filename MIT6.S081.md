@@ -1,6 +1,8 @@
-课程官网：https://pdos.csail.mit.edu/6.828/2020/xv6.html
-课程翻译：https://mit-public-courses-cn-translatio.gitbook.io/mit6-s081
-xv6文档：https://pdos.csail.mit.edu/6.828/2020/xv6/book-riscv-rev1.pdf
+[课程官网](https://pdos.csail.mit.edu/6.828/2020/xv6.html)
+[课程翻译](https://mit-public-courses-cn-translatio.gitbook.io/mit6-s081)
+[实验指导](https://pdos.csail.mit.edu/6.S081/2021/labs/util.html)
+[xv6书籍](https://pdos.csail.mit.edu/6.828/2020/xv6/book-riscv-rev1.pdf)
+[书籍中译文版本](https://github.com/shzhxh/xv6-riscv-book-CN?tab=readme-ov-file)
 
 **本文档用于记录学习过程中的关键点**
 
@@ -350,7 +352,7 @@ git push github util:util
 ```
 
 # Lab1: Xv6 and Unix utilities
-## **Task1: Launch xv6**
+## Task1 Launch xv6
 参考网站：[课程官方实验部署指南](https://pdos.csail.mit.edu/6.828/2018/tools.html)， [CENTOS7部署经验](https://blog.csdn.net/weixin_46803360/article/details/128116051?ops_request_misc=&request_id=&biz_id=102&utm_term=CENTOSMIT6.828&utm_medium=distribute.pc_search_result.none-task-blog-2~all~sobaiduweb~default-0-128116051.142^v100^pc_search_result_base1&spm=1018.2226.3001.4187)， [Ubuntu部署经验](https://blog.csdn.net/u013573243/article/details/129403949?ops_request_misc=%257B%2522request%255Fid%2522%253A%2522171627969616800197084566%2522%252C%2522scm%2522%253A%252220140713.130102334.pc%255Fall.%2522%257D&request_id=171627969616800197084566&biz_id=0&utm_medium=distribute.pc_search_result.none-task-blog-2~all~first_rank_ecpm_v1~rank_v31_ecpm-3-129403949-null-null.142^v100^pc_search_result_base1&utm_term=Error%3A%20Couldnt%20find%20a%20riscv64%20version%20of%20GCC%2Fbinutils.%20***%20To%20turn%20off%20this%20error%2C%20run%20gmake%20TOOLPREFIX%3D%20....&spm=1018.2226.3001.4187)
 自用环境：CentOS7(VMware) + https://github.com/mit-pdos/xv6-public
 实验用：```$ git clone git://g.csail.mit.edu/xv6-labs-2020```
@@ -415,24 +417,309 @@ index 83dd513..c96dab0 100644
 ![Alt text](./image/MIT6.S081/22cac1d518fb42380afc55cd34078a5.png)
 启动成功
 
+***退出 qemu*** : ```Ctrl-a x```
+***显示当前进程***：```Ctrl-p```
+
 ## Task2 Sleep
-<span style="background-color: yellow;">实现xv6的UNIX程序```sleep```：您的```sleep```应该暂停到用户指定的计时数。一个滴答(tick)是由xv6内核定义的时间概念，即来自定时器芯片的两个中断之间的时间。您的解决方案应该在文件***user/sleep.c***中。</span>
+<span style="background-color:lightgreen;">实现xv6的UNIX程序```sleep```：您的```sleep```应该暂停到用户指定的计时数。一个滴答(tick)是由xv6内核定义的时间概念，即来自定时器芯片的两个中断之间的时间。您的解决方案应该在文件***user/sleep.c***中。</span>
 
 **提示：**
 * 在你开始编码之前，请阅读《book-riscv-rev1》的第一章
 
 * 看看其他的一些程序（如 ***/user/echo.c, /user/grep.c, /user/rm.c***）查看如何获取传递给程序的命令行参数
+<details>
+    <summary><span style="color:blue;">echo.c</span> </summary>
+
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+int
+main(int argc, char *argv[])  // argc为命令行的总的参数个数；argv为一个包含所有参数的字符串数组
+{
+  int i;
+
+  for(i = 1; i < argc; i++){  // i=0为程序名称跳过
+    write(1, argv[i], strlen(argv[i]));  // 1 为标准输出文件描述符；argv[i]为要写入的字符串
+    if(i + 1 < argc){  // 当前参数不是最后一个参数时，输出一个空格
+      write(1, " ", 1);
+    } else {
+      write(1, "\n", 1);  //当前参数是最后一个参数时，输出一个换行符
+    }
+  }
+  exit(0);
+}
+```
+</details>
+
+<details>
+    <summary><span style="color:blue;">grep.c</span> </summary>
+
+```c {.line-numbers}
+// Simple grep.  Only supports ^ . * $ operators.
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+char buf[1024];
+int match(char*, char*);
+
+void
+grep(char *pattern, int fd)
+{
+  int n, m;   // 用于跟踪读取的字符数和缓冲区中的字符总数
+  char *p, *q;  // 用于在缓冲区中操作字符串
+
+  m = 0; 
+  while((n = read(fd, buf+m, sizeof(buf)-m-1)) > 0){
+    m += n;  // 更新缓存区字符总数
+    buf[m] = '\0';  // 放置字符串结束符，使得buf为有效字符串
+    p = buf;  // 将指针p设置为缓冲区的开始，准备开始处理缓冲区中的数据
+    while((q = strchr(p, '\n')) != 0){   // 查找每一行的结束位置(\n), strchr函数查找从p开始的第一个\n字符
+      *q = 0;  // 将找到的换行符替换为字符串结束符，这样从p到q的内容现在是一个独立的字符串
+      if(match(pattern, p)){
+        *q = '\n';  // 如果匹配，将之前替换的字符串结束符恢复为换行符，以保持原始数据的完整性
+        write(1, p, q+1 - p);  // 将该行(包括\n)写入标准输出
+      }
+      p = q+1;  // 指针移至下一行的开始位置
+    }
+    if(m > 0){  // 检查是否还有未处理的数据在缓冲区中
+      m -= p - buf;  // 计算剩余未处理的数据长度，并更新m
+      memmove(buf, p, m);  // 将剩余的数据移动到缓冲区的开始位置，为下一次读取做准备
+    } 
+  }
+}
+
+int
+main(int argc, char *argv[])
+{
+  int fd, i;
+  char *pattern;
+
+  if(argc <= 1){
+    fprintf(2, "usage: grep pattern [file ...]\n");
+    exit(1);
+  }
+  pattern = argv[1];
+
+  if(argc <= 2){
+    grep(pattern, 0);
+    exit(0);
+  }
+
+  for(i = 2; i < argc; i++){  // 遍历所有命令行参数（文件名）
+    if((fd = open(argv[i], 0)) < 0){
+      printf("grep: cannot open %s\n", argv[i]);
+      exit(1);
+    }
+    grep(pattern, fd);
+    close(fd);
+  }
+  exit(0);
+}
+
+// Regexp matcher from Kernighan & Pike,
+// The Practice of Programming, Chapter 9.
+
+int matchhere(char*, char*);
+int matchstar(int, char*, char*);
+
+int
+match(char *re, char *text)
+{
+  if(re[0] == '^')
+    return matchhere(re+1, text);
+  do{  // must look at empty string
+    if(matchhere(re, text))
+      return 1;
+  }while(*text++ != '\0');
+  return 0;
+}
+
+// matchhere: search for re at beginning of text
+int matchhere(char *re, char *text)
+{
+  if(re[0] == '\0')
+    return 1;
+  if(re[1] == '*')
+    return matchstar(re[0], re+2, text);
+  if(re[0] == '$' && re[1] == '\0')
+    return *text == '\0';
+  if(*text!='\0' && (re[0]=='.' || re[0]==*text))
+    return matchhere(re+1, text+1);
+  return 0;
+}
+
+// matchstar: search for c*re at beginning of text
+int matchstar(int c, char *re, char *text)
+{
+  do{  // a * matches zero or more instances
+    if(matchhere(re, text))
+      return 1;
+  }while(*text!='\0' && (*text++==c || c=='.'));
+  return 0;
+}
+
+```
+</details>
+
+<details>
+    <summary><span style="color:blue;">rm.c</span> </summary>
+
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+int
+main(int argc, char *argv[])
+{
+  int i;
+
+  if(argc < 2){  // 检查是否至少提供了一个文件名
+    fprintf(2, "Usage: rm files...\n");
+    exit(1);
+  }
+
+  for(i = 1; i < argc; i++){
+    if(unlink(argv[i]) < 0){  // unlink函数返回一个小于0的值，表示删除操作失败
+      fprintf(2, "rm: %s failed to delete\n", argv[i]);
+      break;
+    }
+  }
+
+  exit(0);
+}
+```
+</details>
 
 * 如果用户忘记传递参数，```sleep```应该打印一条错误信息
 
 * 命令行参数作为字符串传递; 您可以使用```atoi```将其转换为数字（详见 ***/user/ulib.c***）
+```c {.line-numbers}
+// ulib.c
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "kernel/fcntl.h"
+#include "user/user.h"
 
+// ...
+
+int
+atoi(const char *s)
+{
+  int n;
+
+  n = 0;
+  while('0' <= *s && *s <= '9')
+    n = n*10 + *s++ - '0';  // 之前的数字左移一位（即乘以10），然后加上新的数字
+  return n;
+}
+```
+
+![Alt text](./image/MIT6.S081/atoi.png)
 * 使用系统调用```sleep```
 
 * 请参阅kernel/sysproc.c以获取实现```sleep```系统调用的xv6内核代码（查找```sys_sleep```），***user/user.h***提供了```sleep```的声明以便其他程序调用，用汇编程序编写的***user/usys.S***可以帮助```sleep```从用户区跳转到内核区。
+```c {.line-numbers}
+// kernel/sysproc.c
+//...
+uint64
+sys_sleep(void)
+{
+  int n;
+  uint ticks0;
+
+  if(argint(0, &n) < 0)
+    return -1;
+  acquire(&tickslock);
+  ticks0 = ticks;
+  while(ticks - ticks0 < n){
+    if(myproc()->killed){
+      release(&tickslock);
+      return -1;
+    }
+    sleep(&ticks, &tickslock);
+  }
+  release(&tickslock);
+  return 0;
+}
+```
 
 * 确保```main```函数调用```exit()```以退出程序。
 
 * 将你的```sleep```程序添加到***Makefile***中的```UPROGS```中；完成之后，```make qemu```将编译您的程序，并且您可以从xv6的shell运行它。
 
 * 看看Kernighan和Ritchie编著的《C程序设计语言》（第二版）来了解C语言。
+***
+**Sleep**
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "user/user.h"
+
+int main(int argc, char const *argv[])
+{
+  if (argc != 2) { //参数错误
+    fprintf(2, "usage: sleep <time>\n");
+    exit(1);
+  }
+  sleep(atoi(argv[1]));
+  exit(0);
+}
+```
+
+## Task3 Pingpong
+<span style="background-color:lightgreen;">编写一个使用UNIX系统调用的程序来在两个进程之间“ping-pong”一个字节，请使用两个管道，每个方向一个。父进程应该向子进程发送一个字节;子进程应该打印“\<pid>: received ping”，其中\<pid>是进程ID，并在管道中写入字节发送给父进程，然后退出;父级应该从读取从子进程而来的字节，打印“\<pid>: received pong”，然后退出。您的解决方案应该在文件```user/pingpong.c```中。。</span>
+
+**提示：**
+* Use ```pipe``` to create a pipe.
+* Use ```fork``` to create a child.
+* Use ```read``` to read from the pipe, and ```write``` to write to the pipe.
+* Use ```getpid``` to find the process ID of the calling process.
+* Add the program to ```UPROGS``` in Makefile.
+* User programs on xv6 have a limited set of library functions available to them. You can see the list in ```user/user.h```; the source (other than for system calls) is in ```user/ulib.c```, ```user/printf.c```, and ```user/umalloc.c```.
+
+**Ping-pong**
+```c {.line-numbers}
+#include "user/user.h"
+#include "kernel/types.h"
+
+int
+main(int argc, char const *argv[])
+{
+  if (argc != 1) {  // 参数错误
+    fprintf(2, "usage: pingpong\n");
+    exit(1);
+  }
+
+  int pid, n;
+  int fds1[2];  // parent->child
+  int fds2[2];  // child->parent
+  char buf = 'Z';  // 用于传送的字节
+
+  // create two pipes, with four FDs in fds1[0], fds1[1], fds2[0], fds2[1]
+  pipe(fds1);
+  pipe(fds2);
+
+  pid = fork();
+  if (pid < 0) {
+    fprintf(2, "fork() error!\n");
+    // 错误处理
+  }
+  else if (pid == 0) {  // child proc  
+    // if read buf, print
+    // send buf to parent through pipe2
+  }
+  else {  // parent proc
+    // 通过pipe1向Child发送buf
+    write(fds[1], &buf, sizeof(char));
+    
+    // if read buf, print
+  }
+  exit(0);
+}
+
+
+```
