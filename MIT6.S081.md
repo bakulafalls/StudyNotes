@@ -389,7 +389,8 @@ compilation terminated.
 原因：内存不足
 尝试在VMware中将内存设为8G
 
-**xv6-labs-2020 make 错误：**
+<h2 id="make-err"> xv6-labs-2020 make 错误：</h2>
+
 1. 
 ```
 user/sh.c: In function 'runcmd':
@@ -671,7 +672,7 @@ int main(int argc, char const *argv[])
 ```
 
 ## Task3 Pingpong
-<span style="background-color:lightgreen;">编写一个使用UNIX系统调用的程序来在两个进程之间“ping-pong”一个字节，请使用两个管道，每个方向一个。父进程应该向子进程发送一个字节;子进程应该打印“\<pid>: received ping”，其中\<pid>是进程ID，并在管道中写入字节发送给父进程，然后退出;父级应该从读取从子进程而来的字节，打印“\<pid>: received pong”，然后退出。您的解决方案应该在文件```user/pingpong.c```中。。</span>
+<span style="background-color:lightgreen;">编写一个使用UNIX系统调用的程序来在两个进程之间“ping-pong”一个字节，请使用两个管道，每个方向一个。父进程应该向子进程发送一个字节;子进程应该打印“\<pid>: received ping”，其中\<pid>是进程ID，并在管道中写入字节发送给父进程，然后退出;父级应该从读取从子进程而来的字节，打印“\<pid>: received pong”，然后退出。您的解决方案应该在文件```user/pingpong.c```中。</span>
 
 **提示：**
 * Use ```pipe``` to create a pipe.
@@ -680,11 +681,11 @@ int main(int argc, char const *argv[])
 * Use ```getpid``` to find the process ID of the calling process.
 * Add the program to ```UPROGS``` in Makefile.
 * User programs on xv6 have a limited set of library functions available to them. You can see the list in ```user/user.h```; the source (other than for system calls) is in ```user/ulib.c```, ```user/printf.c```, and ```user/umalloc.c```.
-
+***
 **Ping-pong**
 ```c {.line-numbers}
-#include "user/user.h"
 #include "kernel/types.h"
+#include "user/user.h"
 
 int
 main(int argc, char const *argv[])
@@ -694,7 +695,7 @@ main(int argc, char const *argv[])
     exit(1);
   }
 
-  int pid, n;
+  int pid, n = 0;  // n为退出错误flag
   int fds1[2];  // parent->child
   int fds2[2];  // child->parent
   char buf = 'Z';  // 用于传送的字节
@@ -707,19 +708,600 @@ main(int argc, char const *argv[])
   if (pid < 0) {
     fprintf(2, "fork() error!\n");
     // 错误处理
+    close(fds1[1]);
+    close(fds2[0]); 
+    close(fds1[0]);
+    close(fds2[1]);
+    n = 1;
   }
-  else if (pid == 0) {  // child proc  
+  else if (pid == 0) {  // child proc 
+    // 关闭子进程中不用的管道口
+    close(fds1[1]);
+    close(fds2[0]); 
     // if read buf, print
+    if (read(fds1[0], &buf, sizeof(buf)) != sizeof(char)) {
+      fprintf(2, "child read error!\n");
+      n = 1;
+    }
+    else {
+      fprintf(2, "%d: received ping\n", getpid());
+    }
+    close(fds1[0]);
     // send buf to parent through pipe2
+    if (write(fds2[1], &buf, sizeof(buf)) != sizeof(char)) {
+      fprintf(2, "child write error!\n");
+      n = 1;
+    }
+    close(fds2[1]);
+    // 退出子进程
+    exit(n);
   }
   else {  // parent proc
+    // 关闭父进程中不用的管道口
+    close(fds1[0]);
+    close(fds2[1]);
     // 通过pipe1向Child发送buf
-    write(fds[1], &buf, sizeof(char));
-    
+    if (write(fds1[1], &buf, sizeof(buf)) != sizeof(char)) {
+      fprintf(2, "parent write error!\n");
+      n = 1;
+    }
+    close(fds1[1]);
     // if read buf, print
+    if (read(fds2[0], &buf, sizeof(buf)) != sizeof(char)) {
+      fprintf(2, "parent read error!\n");
+      n = 1;
+    }
+    else {
+      fprintf(2, "%d: received pong\n", getpid());
+    }
+    close(fds2[0]);
+
+    // 等待子进程退出
+    wait(&n);
+  }
+
+  exit(n);
+}
+
+```
+测试结果：
+![Alt text](./image/MIT6.S081/pingpong.png)
+
+## Task4 Primes(Moderate/Hard)
+<span style="background-color:lightgreen;">使用管道编写```prime sieve```(筛选素数)的并发版本。这个想法是由Unix管道的发明者Doug McIlroy提出的。请查看[这个网站](https://swtch.com/~rsc/thread/)，该网页中间的图片和周围的文字解释了如何做到这一点。您的解决方案应该在***user/primes.c***文件中。</span>
+你的目标是使用```pipe```和```fork```来设置管道。第一个进程将数字2到35输入管道。对于每个素数，您将安排创建一个进程，该进程通过一个管道从其左邻居读取数据，并通过另一个管道向其右邻居写入数据。由于xv6的文件描述符和进程数量有限，因此第一个进程可以在35处停止。
+
+**参考资料翻译：**
+sieve of Eratosthenes算法伪代码：
+```
+p = get a number from left neighbor
+print p
+loop:
+    n = get a number from left neighbor
+    if (p does not divide n)
+        send n to right neighbor
+```
+图解：
+![Alt text](./image/MIT6.S081/sieve.png)
+生成进程可以将数字2、3、4、…、1000输入管道的左端：行中的第一个进程消除2的倍数，第二个进程消除3的倍数，第三个进程消除5的倍数，依此类推。
+
+**提示：**
+* 请仔细关闭进程不需要的文件描述符，否则您的程序将在第一个进程达到35之前就会导致xv6系统资源不足。
+
+* 一旦第一个进程达到35，它应该使用```wait```等待整个管道终止，包括所有子孙进程等等。因此，主```primes```进程应该只在打印完所有输出之后，并且在所有其他```primes```进程退出之后退出。
+
+* 提示：当管道的```write```端关闭时，```read```返回零。
+
+* 最简单的方法是直接将32位（4字节）int写入管道，而不是使用格式化的ASCII I/O。
+
+* 您应该仅在需要时在管线中创建进程。
+
+* 将程序添加到Makefile中的```UPROGS```
+
+**示例输出：**
+```sh
+$ make qemu
+...
+init: starting sh
+$ primes
+prime 2
+prime 3
+prime 5
+prime 7
+prime 11
+prime 13
+prime 17
+prime 19
+prime 23
+prime 29
+prime 31
+$
+```
+***
+**Primes**
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "user/user.h"
+
+/**
+ *@brief 读取上一个管道的第一个数据并打印
+ *@param pfirst 指向储存第一个数据的指针
+*/
+int
+lpipe_first_data(int lpipe[2], int *pfirst)
+{
+  if (read(lpipe[0], pfirst, sizeof(int)) == sizeof(int)) {
+    fprintf(2, "prime %d\n", *pfirst);
+    return 0;
+  }
+  return -1;
+}
+
+
+/**
+ *@brief 将lpipe中的数据传入p中，剔除掉不能被 first_number整除的数据
+ *@param lpipe 上一个管道
+ *@param rpipe 新的管道
+ *@param pfirst 指向储存第一个数据的指针
+*/
+void
+transmit_data(int lpipe[2], int rpipe[2], int *pfirst)
+{
+  int data;  // 存放读取的lpipe数据
+  while (read(lpipe[0], &data, sizeof(int)) == sizeof(int))
+  {
+    // 将无法整除的数据传入rpipe
+    if (data % *pfirst) {
+      write(rpipe[1], &data, sizeof(int));
+    }
+  }
+  close(lpipe[0]);
+  close(rpipe[1]);
+}
+
+
+/**
+ *@brief 寻找素数 
+ *@param lpipe: 上一个管道的管道符
+*/
+__attribute__((noreturn))  // 告诉编译器，这个函数不会返回
+void
+find_primes(int lpipe[2])
+{
+  // 关闭上一个管道的写入端，已经不需要了
+  close(lpipe[1]);
+  int first_number;
+  if (lpipe_first_data(lpipe, &first_number) == 0)  // 打印上一个管道得到的素数
+  {
+    int p[2];
+    pipe(p);  // 新建管道作为当前管道
+    //  将lpipe中的数据传入p中，剔除掉不能被 first_number整除的数据
+    transmit_data(lpipe, p, &first_number);
+    if (fork() == 0) {  //  新建子进程处理新的管道
+      close(p[1]);
+      find_primes(p);  // 递归
+    }
+    else {
+      close(p[0]);
+      close(p[1]);
+      wait(0);  // 最后一个孙进程结束前，所有之前的进程都等待
+    }
   }
   exit(0);
 }
 
 
+int
+main(int argc, char const *argv[])
+{
+  if (argc != 1) {  // 参数错误
+    fprintf(2, "usage: primes\n");
+    exit(1);
+  }
+
+  int pid;
+  int fds[2];
+  pipe(fds);
+
+  for (int i=2; i <= 35; i++)  // 写入2-35到第一个管道中
+  {
+    write(fds[1], &i, sizeof(int));
+  }
+
+  pid = fork();
+  if (pid == 0) {  // child
+    // 寻找素数
+    find_primes(fds);
+  }
+  else {  // oldest parent, do nothing but wait
+    close(fds[0]);
+    close(fds[1]);
+    wait(0);
+  }
+  exit(0);
+}
 ```
+需要注意的是， 我搭建的环境下的编译器似乎不能很好地理解递归停止条件，参照[task1中的xv6-labs-2020 make 错误](#make-err)，须在使用递归的函数前面添加```__attribute__((noreturn))```, 才能编译通过，输出如下：
+![Alt text](./image/MIT6.S081/primes.png)
+
+## Task5 Find(Moderate)
+<span style="background-color:lightgreen;">写一个简化版本的UNIX的```find```程序：查找目录树中具有特定名称的所有文件，你的解决方案应该放在***user/find.c***.</span>
+
+**提示：**
+* 查看***user/ls.c***文件学习如何读取目录
+<details>
+    <summary><span style="color:blue;">ls.c</span> </summary>
+
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+#include "kernel/fs.h"
+
+char*
+fmtname(char *path)
+{
+  static char buf[DIRSIZ+1];
+  char *p;
+
+  // Find first character after last slash.
+  for(p=path+strlen(path); p >= path && *p != '/'; p--)
+    ;  // p指向从后往前搜索到的第一个'/'
+  p++;
+
+  // Return blank-padded name.
+  if(strlen(p) >= DIRSIZ)
+    return p;
+  memmove(buf, p, strlen(p));
+  memset(buf+strlen(p), ' ', DIRSIZ-strlen(p));  // 确保所有文件名长度相同
+  return buf;
+}
+
+void
+ls(char *path)
+{
+  char buf[512], *p;
+  int fd;
+  struct dirent de;  // 目录
+  struct stat st;  // 状态信息
+
+  if((fd = open(path, 0)) < 0){
+    fprintf(2, "ls: cannot open %s\n", path);
+    return;
+  }
+
+  if(fstat(fd, &st) < 0){
+    fprintf(2, "ls: cannot stat %s\n", path);
+    close(fd);
+    return;
+  }
+
+  switch(st.type){
+  case T_FILE:  // (2)
+    printf("%s %d %d %l\n", fmtname(path), st.type, st.ino, st.size);
+    break;
+
+  case T_DIR:  // (1)
+    if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
+      printf("ls: path too long\n");
+      break;
+    }
+    strcpy(buf, path);  // 在 buf 中构建新的路径，为读取目录内容做准备
+    p = buf+strlen(buf);
+    *p++ = '/';
+    while(read(fd, &de, sizeof(de)) == sizeof(de)){
+      if(de.inum == 0)
+        continue;
+      memmove(p, de.name, DIRSIZ);
+      p[DIRSIZ] = 0;  // 在复制的文件名后添加一个字符串结束符
+      if(stat(buf, &st) < 0){
+        printf("ls: cannot stat %s\n", buf);
+        continue;
+      }
+      printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, st.size);
+    }
+    break;
+  }
+  close(fd);
+}
+
+int
+main(int argc, char *argv[])
+{
+  int i;
+
+  if(argc < 2){
+    ls(".");
+    exit(0);
+  }
+  for(i=1; i<argc; i++)
+    ls(argv[i]);
+  exit(0);
+}
+```
+</details>
+
+* 使用递归允许```find```下降到子目录中
+* 不要在“```.```”和“```..```”目录中递归
+* 对文件系统的更改会在qemu的运行过程中一直保持；要获得一个干净的文件系统，请运行```make clean```，然后```make qemu```
+* 你将会使用到C语言的字符串，要学习它请看《C程序设计语言》（K&R）,例如第5.5节
+* 注意在C语言中不能像python一样使用“```==```”对字符串进行比较，而应当使用```strcmp()```
+* 将程序加入到***Makefile***的```UPROGS```
+
+**示例输出(文件系统中包含文件b和a/b)：**
+```sh
+$ make qemu
+...
+init: starting sh
+$ echo > b
+$ mkdir a
+$ echo > a/b
+$ find . b
+./b
+./a/b
+$
+```
+
+**find**
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+#include "kernel/fs.h"
+
+/**
+ *@brief 寻找指定文件
+ *@param path 要搜寻的目录路径  
+ *@param filename 要搜寻的文件名
+*/
+//__attribute__((noreturn))
+void
+find(char *path, const char *filename)
+{
+  // 在第一级目录下搜寻
+  char buf[512], *p;  // buf用于构建路径
+  int fd;
+  struct dirent de;  // 目录
+  struct stat st;  // 状态信息
+
+  if((fd = open(path, 0)) < 0){
+    fprintf(2, "find: cannot open %s\n", path);
+    return;
+  }
+
+  if(fstat(fd, &st) < 0){
+    fprintf(2, "find: cannot stat %s\n", path);
+    close(fd);
+    return;
+  }
+
+  if (st.type != T_DIR) {
+    fprintf(2, "invaild path! usage: find <dir> <filename>\n");
+    close(fd);
+    return;
+  }
+
+  if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
+      fprintf(2, "ls: path too long\n");
+      return;
+    }
+
+  strcpy(buf, path);  // 在 buf 中构建新的路径，为读取目录内容做准备
+  p = buf+strlen(buf);
+  *p++ = '/';  // p指向最后一个'/'后一个字符 
+  while(read(fd, &de, sizeof(de)) == sizeof(de)){  // 遍历当前目录下每一个文件
+    if(de.inum == 0)
+      continue;
+    memmove(p, de.name, DIRSIZ);  // 添加路径名称
+    p[DIRSIZ] = 0;  // 在复制的文件名后添加一个字符串结束符
+    if(stat(buf, &st) < 0){
+      fprintf(2, "ls: cannot stat %s\n", buf);
+      continue;
+    }
+
+    // 递归， "." 和 ".." 目录除外
+    if (st.type == T_DIR && strcmp(p, ".") != 0 && strcmp(p, "..") != 0)
+    {
+      find(buf, filename);
+    }
+    else if (strcmp(filename, p) == 0)  // p指向的字符串不为DIR, 而是FILE（忽略DEVICE的情况），进行文件名比对
+    printf("%s\n", buf);
+  }
+}
+
+
+int
+main(int argc, char *argv[])
+{
+  if (argc != 3) {  // 参数错误
+    fprintf(2, "usage: find <dir> <filename>\n");
+    exit(1);
+  }
+
+  find(argv[1], argv[2]);
+  exit(0);
+}
+```
+
+**测试输出：**
+![Alt text](./image/MIT6.S081/find.png)
+
+## Task6 xargs(Moderate)
+<span style="background-color:lightgreen;">编写一个简化版UNIX的```xargs```程序：它从标准输入中按行读取，并且为每一行执行一个命令，将行作为参数提供给命令。你的解决方案应该在***user/xargs.c***</span>
+
+**示例1：**
+```sh
+$ echo hello too | xargs echo bye
+bye hello too
+$
+```
+上面的命令实际上执行的是```echo bye hello too```
+
+**示例2 ：**  UNIX系统下设置参数-n为1等效于lab所用系统(每次从输入中取出一个参数来执行后面的命令)
+```sh
+$ echo "1\n2" | xargs -n 1 echo line
+line 1
+line 2
+$
+```
+对于每个输入项（这里是 "1" 和 "2"），```xargs``` 都会执行 ```echo line```，并将输入项作为参数附加到 ```echo line``` 命令后面。
+
+**示例3：**
+```sh
+$ find . b | xargs grep hello
+```
+上面的命令会在"."下查找所有文件名为b的文件， 并在每个文件b中执行```grep hello```
+
+**提示：**
+* 对于示例1，"|"创建了一个管道连接两个命令：
+```echo hello too``` 在管道的写端，对应标准输入流0
+```xargs echo bye``` 在管道的读端。
+* 使用```fork```和```exec```对每行输入调用命令，在父进程中使用```wait```等待子进程完成命令。
+* 要读取单个输入行，请一次读取一个字符，直到出现换行符（```'\n'```）。
+* ***kernel/param.h***声明```MAXARG```，如果需要声明```argv```数组，这可能很有用。
+* 将程序添加到***Makefile***中的```UPROGS```。
+* 对文件系统的更改会在qemu的运行过程中保持不变；要获得一个干净的文件系统，请运行```make clean```，然后```make qemu```
+
+**xargs**
+```c {.line-numbers}
+#include "kernel/types.h"
+#include "kernel/param.h"
+#include "user/user.h"
+
+#define MAXSZ 512
+
+// 当前字符状态定义
+enum state {
+  S_WAIT,           // 等待输入（初始状态、空格）
+  S_ARG,            // 当前为参数
+  S_ARG_END,        // 参数结束
+  S_ARG_LINE_END,   // 左侧有参数的换行，e.g.: "arg\n"
+  S_LINE_END,       // 左侧有空格的换行，e.g.: "arg \n"
+  S_END             // 结束
+};
+
+// 字符类型定义
+enum char_type {
+  C_SPC,  // 空格
+  C_CHR,  // 普通字符
+  C_LNEND // 换行符
+};
+
+
+/**
+ *@brief 获取字符类型
+ *@param c 要判定的字符
+*/
+enum char_type get_char_type(char c)
+{
+  switch (c) {
+    case ' ':
+      return C_SPC;
+    case '\n':
+      return C_LNEND;
+    default:
+      return C_CHR;
+  }
+}
+
+
+/**
+ *@brief 根据当前字符类型转换当前状态
+ *@param last_state 判定前的状态
+ *@param cur_char 当前字符种类
+*/
+enum state transform_state(enum state last_state, enum char_type cur_char)
+{
+  switch (last_state) {
+    case S_WAIT:
+      if (cur_char == C_SPC)    return S_WAIT; // 继续等待
+      if (cur_char == C_LNEND)  return S_LINE_END;
+      if (cur_char == C_CHR)    return S_ARG;
+      break;
+    case S_ARG:
+      if (cur_char == C_SPC)    return S_ARG_END;  // 参数结束
+      if (cur_char == C_LNEND)  return S_ARG_LINE_END;
+      if (cur_char == C_CHR)    return S_ARG;  
+      break;
+    case S_ARG_END:  
+    case S_ARG_LINE_END:
+    case S_LINE_END:  // 换行后情况都一样
+      if (cur_char == C_SPC)    return S_WAIT;  
+      if (cur_char == C_LNEND)  return S_LINE_END;  // 连换两行
+      if (cur_char == C_CHR)    return S_ARG;  
+    default:  // S_END
+      break;
+  }
+  return S_END;
+}
+
+
+int
+main(int argc, char *argv[])  
+{
+  if (argc > MAXARG)  { // 参数错误
+    fprintf(2, "Too many arguments!\n");
+    exit(1);
+  }
+
+  enum state st = S_END;  // 用于表示状态
+  char lines[MAXSZ];  // 初始化内存用于读取命令参数
+  char *p = lines;  // 初始化指针指向用于储存命令行的缓存
+  char *new_argv[MAXARG] = {0};  // 初始化用于存储参数的指针数组
+  int arg_start = 0;  // 参数起点
+  int arg_end = 0;  // 参数终点
+  int arg_cur = argc-1;  // 当前参数索引, 前面已经有argc-1个参数被记录了，如实例1中的"echo","bye",为argv[1:2]
+
+  // 存储管道写入端里的原有的命令参数,如实例1中的"argx","echo","bye"，argc=3, 我们只储存"echo","bye"
+  for (int i = 1; i < argc; ++i) {
+    new_argv[i - 1] = argv[i];
+  }
+
+  // 对每一行命令参数循环, 每个while读取一个字符
+  while (st != S_END ) {
+    if (read(0, p, sizeof(char)) != sizeof(char)) {  // 读取到的命令为空，设置状态为结束
+      st = S_END;
+    }
+    else {
+      transform_state(st, get_char_type(*p));
+      ++arg_end;  // 新读取了一个字符，需要更新当前参数结束位置
+    }
+
+    switch (st) {
+      case S_WAIT:  // 忽略掉当前的空格，右移参数起始指针
+        ++arg_start;
+        break; 
+      case S_ARG_END:  // 在new_argv中储存当前参数地址
+        new_argv[arg_cur++] = &lines[arg_start];
+        arg_start = arg_end;  // 移动参数起点到下一个参数位置
+        *p = '\0';  // 在缓存中参数结尾添加字符串结束符
+        break;
+      case S_ARG_LINE_END:  // 先将参数地址存入newargv,然后和S_LINE_END一样执行命令
+        new_argv[arg_cur++] = &lines[arg_start];
+      case S_LINE_END:  // 为当前行执行命令
+        arg_start = arg_end;
+        *p = '\0';
+        if (fork() == 0) {
+          exec(argv[1], new_argv);  // arg[0]为xargs
+        }
+        arg_cur = argc - 1;  // 重置位置
+        // 换行，清空参数
+        for (int i = arg_cur; i < MAXARG; ++i)
+          new_argv[i] = 0;
+        wait(0);
+        break;
+      default:
+        break;
+    }
+
+    p++;  // 读取下一个字符
+  }
+
+  exit(0);
+}
+```
+
+**测试结果：**
+You may have to go back and fix bugs in your find program. The output has many ```$``` because the xv6 shell doesn't realize it is processing commands from a file instead of from the console, and prints a ```$``` for each command in the file.
+![Alt text](./image/MIT6.S081/xargs.png)
+由于xv6系统不能识别命令来自于控制台还是文件，因此输出一串```$```,需要其他方法验证代码正确性
