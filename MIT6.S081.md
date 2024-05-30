@@ -1,6 +1,6 @@
 [课程官网](https://pdos.csail.mit.edu/6.828/2020/xv6.html)
 [课程翻译](https://mit-public-courses-cn-translatio.gitbook.io/mit6-s081)
-[实验指导](https://pdos.csail.mit.edu/6.S081/2021/labs/util.html)
+[书籍翻译&实验指导](https://pdos.csail.mit.edu/6.S081/2021/labs/util.html)
 [xv6书籍](https://pdos.csail.mit.edu/6.828/2020/xv6/book-riscv-rev1.pdf)
 [书籍中译文版本](https://github.com/shzhxh/xv6-riscv-book-CN?tab=readme-ov-file)
 
@@ -1244,7 +1244,7 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  enum state st = S_END;  // 用于表示状态
+  enum state st = S_WAIT;  // 用于表示状态
   char lines[MAXSZ];  // 初始化内存用于读取命令参数
   char *p = lines;  // 初始化指针指向用于储存命令行的缓存
   char *new_argv[MAXARG] = {0};  // 初始化用于存储参数的指针数组
@@ -1263,7 +1263,7 @@ main(int argc, char *argv[])
       st = S_END;
     }
     else {
-      transform_state(st, get_char_type(*p));
+      st = transform_state(st, get_char_type(*p));
       ++arg_end;  // 新读取了一个字符，需要更新当前参数结束位置
     }
 
@@ -1281,8 +1281,10 @@ main(int argc, char *argv[])
       case S_LINE_END:  // 为当前行执行命令
         arg_start = arg_end;
         *p = '\0';
+        new_argv[arg_cur] = 0;  // 确保参数列表以NULL结束
         if (fork() == 0) {
           exec(argv[1], new_argv);  // arg[0]为xargs
+          exit(0);  // 确保子进程在exec失败时退出 
         }
         arg_cur = argc - 1;  // 重置位置
         // 换行，清空参数
@@ -1302,6 +1304,481 @@ main(int argc, char *argv[])
 ```
 
 **测试结果：**
-You may have to go back and fix bugs in your find program. The output has many ```$``` because the xv6 shell doesn't realize it is processing commands from a file instead of from the console, and prints a ```$``` for each command in the file.
+
 ![Alt text](./image/MIT6.S081/xargs.png)
-由于xv6系统不能识别命令来自于控制台还是文件，因此输出一串```$```,需要其他方法验证代码正确性
+测试成功
+
+# Lec03 OS Organization and System Calls
+## 看书预习
+*  操作系统的三大要求：**多路复用(multiplexing)、隔离(isolation)和交互(interaction)**, 书上侧重于讲解以**宏内核(monolithic kernel)** 为中心的主流设计来实现这三点。
+*  RISC-V是一个64位的中央处理器，xv6是用基于 **“LP64”的C语言** 编写的, 所以```Long```(L)和指针变量(p)为64位，int为32位。
+* Xv6是以qemu的“-machine virt”选项模拟的支撑硬件编写的。这包括RAM、包含引导代码的ROM、一个到用户键盘/屏幕的串行连接，以及一个用于存储的磁盘。
+* 用户态=用户模式=目态
+  核心态=管理模式=管态 
+* **宏内核**：整个操作系统都驻留在内核中，这样**所有系统调用的实现都以管理模式运行**。
+优点：方便操作系统设计者进行设计，操作系统的不同部分更容易合作
+缺点：操作系统不同部分之间的接口通常很复杂，内核代码量更大使得更容易出现的bug经常会导致计算机停止工作.
+* **微内核（microkernel）**： 为降低内核出错的风险，最大限度地**减少**在**管理模式下运行的操作系统代码量**，并在用户模式下执行大部分操作系统
+![microkernel](./image/MIT6.S081/microkernel.png)
+图中，**文件系统**作为**用户级进程**运行。作为进程运行的操作系统服务被称为**服务器**。为了允许应用程序与文件服务器交互，内核提供了允许从一个用户态进程向另一个用户态进程发送消息的进程间通信机制。例如，如果像shell这样的应用程序想要读取或写入文件，它会向文件服务器发送消息并等待响应。
+* 单机微内核操作系统中几乎无一例外地都采用**客户/服务器(C/S)模式**，将操作系统中最基本的部分放入内核中，而把操作系统的绝大部分功能都放在微内核外面的一组服务器(进程)中实现。
+* 内核模块间接口(***kernel/defs.h***):
+
+|文件|描述|
+|----|-----------------|
+|bio.c|	文件系统的磁盘块缓存|
+|console.c|	连接到用户的键盘和屏幕|
+|entry.S|	首次启动指令|
+|exec.c	|exec()系统调用|
+|file.c	|文件描述符支持|
+|fs.c	|文件系统|
+|kalloc.c|	物理页面分配器|
+|kernelvec.S	|处理来自内核的陷入指令以及计时器中断|
+|log.c	|文件系统日志记录以及崩溃修复|
+|main.c	|在启动过程中控制其他模块初始化|
+|pipe.c	|管道|
+|plic.c	|RISC-V中断控制器|
+|printf.c	|格式化输出到控制台|
+|proc.c	|进程和调度|
+|sleeplock.c	|Locks that yield the CPU|
+|spinlock.c	|Locks that don’t yield the CPU.|
+|start.c	|早期机器模式启动代码|
+|string.c	|字符串和字节数组库|
+|swtch.c	|线程切换|
+|syscall.c	|Dispatch system calls to handling function.|
+|sysfile.c	|文件相关的系统调用|
+|sysproc.c	|进程相关的系统调用|
+|trampoline.S	|用于在用户和内核之间切换的汇编代码|
+|trap.c	|对陷入指令和中断进行处理并返回的C代码|
+|uart.c	|串口控制台设备驱动程序|
+|virtio_disk.c	|磁盘设备驱动程序|
+|vm.c	|管理页表和地址空间|
+
+* **进程(process)** 是操作系统的隔离单位。内核用来实现进程的机制包括  **用户/管理模式标志、地址空间和线程的时间切片**。
+* 进程抽象给程序提供了一种错觉(illusion)，即它有自己的专用机器。进程为程序提供了一个看起来像是私有内存系统或地址空间的东西，其他进程不能读取或写入。进程还为程序提供了看起来像是自己的CPU来执行程序的指令。
+* Xv6使用页表（由硬件实现）为每个进程提供自己的地址空间。RISC-V页表将虚拟地址（RISC-V指令操纵的地址）转换（或“映射”）为物理地址（CPU芯片发送到主存储器的地址）。
+![pagetable](./image/MIT6.S081/pagetable.png)
+上图中一个进程的虚拟内存地址从0开始到MAXVA结束。xv6中指针有64位宽；硬件在页表中查找虚拟地址时只使用低39位；xv6只使用这39位中的38位。因此，最大地址是2^38-1=0x3fffffffff。堆区域用来使得进程可以根据需要来扩展。
+*  **上下文（context）:**  进程执行所需的所有**数据和资源的集合**。
+* **状态片段(piece of stste):** 在某个特定时刻，进程的一个或多个部分的状态信息。例如：
+当前程序计数器的值，即下一条要执行的指令的地址。
+某个特定寄存器的值，例如累加器的内容。
+页表中的某个条目，表示某个虚拟页与物理页的映射关系。
+打开的文件描述符列表中的一个条目，表示一个特定的文件及其当前状态。
+这些"pieces of state"共同构成了进程的完整上下文。
+* xv6内核为每个进程维护许多状态片段，并将它们聚集到一个```proc```(***kernel/proc.h:86***)结构体中。一个进程最重要的状态片段是**页表、内核栈区和运行状态**
+```c 
+// Per-process state
+struct proc {
+  struct spinlock lock;
+
+  // p->lock must be held when using these:
+  enum procstate state;        // Process state
+  struct proc *parent;         // Parent process
+  void *chan;                  // If non-zero, sleeping on chan
+  int killed;                  // If non-zero, have been killed
+  int xstate;                  // Exit status to be returned to parent's wait
+  int pid;                     // Process ID
+
+  // these are private to the process, so p->lock need not be held.
+  uint64 kstack;               // Virtual address of kernel stack 内核栈区
+  uint64 sz;                   // Size of process memory (bytes)
+  pagetable_t pagetable;       // User page table
+  struct trapframe *trapframe; // data page for trampoline.S
+  struct context context;      // swtch() here to run process
+  struct file *ofile[NOFILE];  // Open files
+  struct inode *cwd;           // Current directory
+  char name[16];               // Process name (debugging)
+};
+```
+
+* 每个进程有两个栈区：一个*用户栈区*和一个*内核栈区*。进程的**执行线程**在主动使用它的用户栈和内核栈之间交替。
+* 一个进程可以通过执行RISC-V的```ecall```指令进行系统调用，该指令提升硬件特权级别，并将程序计数器（PC）更改为内核定义的入口点，入口点的代码切换到内核栈，执行实现系统调用的内核指令，当系统调用完成时，内核切换回用户栈，并通过调用```sret```指令返回用户空间，该指令降低了硬件特权级别，并在系统调用指令刚结束时恢复执行用户指令。进程的线程可以在内核中“阻塞”等待I/O，并在I/O完成后恢复到中断的位置。
+* RISC-V提供指令```mret```以进入管理模式，该指令最常用于将管理模式切换到机器模式的调用中返回。
+
+## 3.2 操作系统隔离性（isolation）
+* 操作系统不是直接将CPU提供给应用程序，而是向应用程序提供“进程”，**进程抽象了CPU**，这样操作系统才能在多个应用程序之间复用一个或者多个CPU
+
+|操作系统|进程|CPU|
+|--|--|--|
+
+## 3.3 操作系统防御性（Defensive）
+* 两种硬件支持来实现强隔离性：
+1. **user/kernel mode** （在RISC-V中被称为**Supervisor mode**）
+2. **页表(page table)** 或者 **虚拟内存（Virtual Memory）**
+
+## 3.5 User/Kernel mode切换
+* 在RISC-V架构的系统中，用户的应用程序执行系统调用的唯一方法就是通过的```ECALL```指令来触发**软中断**，```ecall```接受的数字参数代表了应用程序想要调用的System Call。
+
+## 3.6 宏内核 vs 微内核 （Monolithic Kernel vs Micro Kernel）
+* 微内核的的**用户空间<->内核空间跳转**是宏内核的两倍。通常微内核的挑战在于性能更差，有两个方面需要考虑：
+1. 在user/kernel mode反复跳转带来的性能损耗。
+2. 在一个类似宏内核的紧耦合系统，各个组成部分，例如文件系统和虚拟内存系统，可以很容易的共享page cache。而在微内核中，每个部分之间都很好的隔离开了，这种共享更难实现。进而导致更难在微内核中得到更高的性能。
+
+## 3.7 编译运行kernel
+* 内核的编译过程：
+![make_kernel](./image/MIT6.S081/makefile.png)
+1. ***Makefile***（XV6目录下的文件）会读取一个C文件，例如```proc.c```；之后调用***gcc编译器***，生成一个文件叫做```proc.s```，这是RISC-V 汇编语言文件；之后再走到***汇编解释器***，生成```proc.o```，这是汇编语言的二进制格式。
+2. Makefile会为所有内核文件做相同的操作
+3. **系统加载器（Loader）** 会收集所有的.o文件，将它们链接在一起，并生成内核文件。生成的内核文件就是我们将会在QEMU中运行的文件.
+
+* ***Makefile***还会创建```kernel.asm```，其中含了内核的完整汇编语言
+```c {.line-numbers}
+// kernel.asm
+kernel/kernel：     文件格式 elf64-littleriscv
+
+
+Disassembly of section .text:
+
+0000000080000000 <_entry>:
+    80000000:	00009117          	auipc	sp,0x9
+    80000004:	a1010113          	addi	sp,sp,-1520 # 80008a10 <stack0>
+    80000008:	6505                	lui	a0,0x1
+    8000000a:	f14025f3          	csrr	a1,mhartid  // scrr: Control and Status Register Read; mhartid: machine hardware thread id
+    8000000e:	0585                	addi	a1,a1,1
+    80000010:	02b50533          	mul	a0,a0,a1
+    80000014:	912a                	add	sp,sp,a0
+    80000016:	076000ef          	jal	8000008c <start>
+
+000000008000001a <spin>:
+    8000001a:	a001                	j	8000001a <spin>
+
+000000008000001c <timerinit>:
+// at timervec in kernelvec.S,
+// which turns them into software interrupts for
+// devintr() in trap.c.
+void
+timerinit()
+{
+    8000001c:	1141                	addi	sp,sp,-16
+    8000001e:	e422                	sd	s0,8(sp)
+    80000020:	0800                	addi	s0,sp,16
+    ...
+```
+
+可以看到第一个指令位于地址```0x80000000```，对应的是一个RISC-V指令。加载程序将**内核**放在```0x80000000```而不是```0x0```的原因是地址范围``0x0:0x80000000``包含**I/O设备**。
+
+* 项目执行```make qemu```时可以看到：
+![make_params](./image/MIT6.S081/make_params.png)
+其中可以看到传给QEMU的几个参数：
+1. ```-kernel```：这里传递的是内核文件（kernel目录下的***kernel***文件），这是将在QEMU中运行的程序文件。
+1. ```-m```：这里传递的是RISC-V虚拟机将会使用的内存数量
+1. ```-smp```：这里传递的是虚拟机可以使用的CPU核数
+1. ```-drive```：传递的是虚拟机使用的磁盘驱动，这里传入的是fs.img文件
+
+## 3.8 QEMU
+* 在内部，在QEMU的主循环中，只在做一件事情：
+1. **读取（read）** 4字节或者8字节的RISC-V指令。
+1. **解析(decode)** RISC-V指令，并找出对应的操作码（op code）。我们之前在看```kernel.asm```的时候，看过一些操作码的二进制版本。通过解析，或许可以知道这是一个ADD指令，或者是一个SUB指令。
+1. 之后，在软件中**执行(execute)** 相应的指令。
+
+## 3.9 xv6的启动过程
+* 一个实验：
+1. 启动qemu,打开gdb
+```sh
+[root@localhost xv6-riscv]# make CPUS=1 qemu-gdb
+sed "s/:1234/:25000/" < .gdbinit.tmpl-riscv > .gdbinit
+*** Now run 'gdb' in another window.
+qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel -m 128M -smp 1 -nographic -global virtio-mmio.force-legacy=false -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -S -gdb tcp::25000
+```
+
+2. 下面需要用到RISC-V 64位Linux的gdb。安装方法参照[官方说明](https://pdos.csail.mit.edu/6.828/2023/tools.html), 我的CentOS7上安装方法稍微复杂一些：
+<details>
+    <summary><span style="color:blue;">安装方法</span> </summary>
+
+```sh
+// 1. 下载并安装源代码
+wget http://ftp.gnu.org/gnu/gdb/gdb-8.3.1.tar.gz
+tar -xvf gdb-8.3.1.tar.gz
+cd gdb-8.3.1
+
+// 2. 配置和安装：
+./configure --target=riscv64-unknown-elf --with-python
+make
+sudo make install
+
+// 3. 确认 gdb 安装并支持 RISC-V 架构：
+riscv64-unknown-elf-gdb --version
+
+// 4. 启动时发现安全路径设置警告，编辑或创建配置文件 /root/.config/gdb/gdbinit：
+mkdir -p /root/.config/gdb
+nano /root/.config/gdb/gdbinit
+// 在文件中添加以下内容：
+add-auto-load-safe-path /root/xv6-riscv/.gdbinit
+// 关闭并保存文件，之后便可正常运行gdb
+```
+</details>
+
+再启动一个RISC-V 64位Linux的gdb
+```sh
+[root@localhost xv6-riscv]# riscv64-unknown-elf-gdb
+```
+3. 在程序的入口处设置一个断点，参照***kernel.asm***，我们知道入口处在```0x8000000```，这是qemu跳转到的第一个指令
+```sh
+(gdb) b _entry
+Breakpoint 1 at 0x8000000a
+```
+发现程序没有停在```0x8000000```而是```0x800000a```
+```sh
+(gdb) c
+Continuing.
+
+Breakpoint 1, 0x000000008000000a in _entry ()
+=> 0x000000008000000a <_entry+10>:	f14025f3        	csrr	a1,mhartid
+```
+该行在地址0x8000000a读取了控制系统寄存器（Control System Register）mhartid，并将结果加载到了a1寄存器。
+XV6从entry.s开始启动，这个时候没有内存分页，没有隔离性，并且运行在M-mode（machine mode）。**XV6会尽可能快的跳转到kernel mode或者说是supervisor mode**。我们在main函数设置一个断点，main函数已经运行在supervisor mode了。
+4. 用gdb逐行运行main：
+![main](./image/MIT6.S081/main.png)
+可以在qumu中看到相应的输出。
+下面是初始化函数的功能：
+```c
+// start() jumps here in supervisor mode on all CPUs.
+void
+main()
+{
+  if(cpuid() == 0){
+    consoleinit();
+    printfinit();
+    printf("\n");
+    printf("xv6 kernel is booting\n");
+    printf("\n");
+    kinit();         // physical page allocator 设置好页表分配器（page allocator）
+    kvminit();       // create kernel page table 设置好虚拟内存，这是下节课的内容
+    kvminithart();   // turn on paging 打开页表，也是下节课的内容
+    procinit();      // process table 设置好初始进程或者说设置好进程表单
+    trapinit();      // trap vectors //
+    trapinithart();  // install kernel trap vector   // 设置好user/kernel mode转换代码
+    plicinit();      // set up interrupt controller  // 设置好中断控制器PLIC（Platform Level Interrupt Controller）
+    plicinithart();  // ask PLIC for device interrupts  // 我们后面在介绍中断的时候会详细的介绍这部分，这是我们用来与磁盘和console交互方式
+    binit();         // buffer cache 分配buffer cache
+    iinit();         // inode table 初始化inode缓存
+    fileinit();      // file table 初始化文件系统
+    virtio_disk_init(); // emulated hard disk 初始化磁盘
+    userinit();      // first user process 运行第一个进程
+    __sync_synchronize();
+    started = 1;
+  }
+```
+
+5. 查看```userinit()```内部内容:
+<details>
+    <summary><span style="color:blue;">proc.c中部分代码</span> </summary>
+
+```c 
+// a user program that calls exec("/init")
+// assembled from ../user/initcode.S
+// od -t xC ../user/initcode
+uchar initcode[] = {
+  0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02,
+  0x97, 0x05, 0x00, 0x00, 0x93, 0x85, 0x35, 0x02,
+  0x93, 0x08, 0x70, 0x00, 0x73, 0x00, 0x00, 0x00,
+  0x93, 0x08, 0x20, 0x00, 0x73, 0x00, 0x00, 0x00,
+  0xef, 0xf0, 0x9f, 0xff, 0x2f, 0x69, 0x6e, 0x69,
+  0x74, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00
+};
+
+// Set up first user process.
+void
+userinit(void)
+{
+  struct proc *p;
+
+  p = allocproc();
+  initproc = p;
+  
+  // allocate one user page and copy initcode's instructions
+  // and data into it.
+  uvmfirst(p->pagetable, initcode, sizeof(initcode));
+  p->sz = PGSIZE;
+
+  // prepare for the very first "return" from kernel to user.
+  p->trapframe->epc = 0;      // user program counter
+  p->trapframe->sp = PGSIZE;  // user stack pointer
+
+  safestrcpy(p->name, "initcode", sizeof(p->name));
+  p->cwd = namei("/");
+
+  p->state = RUNNABLE;
+
+  release(&p->lock);
+}
+```
+</details>
+
+```initcode```是用来初始化第一个用户进程，因为我们总是需要有一个用户进程在运行，这样才能实现与操作系统的交互。这里显示为程序的二进制形式，它会链接或者在内核中直接静态定义。实际上```initcode```包含4条汇编指令：
+1）首先将init中的地址加载到```a0（la a0, init）```
+2）argv中的地址加载到```a1（la a1, argv）```
+3）exec系统调用对应的数字加载到```a7（li a7, SYS_exec）```
+4）调用```ecall```, 将控制权交给了操作系统
+
+5. 在```syscall```设置一个断点
+```sh
+(gdb) b syscall
+Breakpoint 3 at 0x80002be2: file kernel/syscall.c, line 133.
+```
+让程序继续运行
+```sh
+(gdb) c
+Continuing.
+
+Breakpoint 3, syscall () at kernel/syscall.c:133
+133	{
+```
+查看***syscall.c:133***处的代码：
+```c
+// part of syscall.c
+void
+syscall(void)
+{                                // 133行
+  int num;
+  struct proc *p = myproc();
+
+  num = p->trapframe->a7;  // 读取使用的系统调用对应的整数, 执行完后num=7
+  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    // Use num to lookup the system call function for num, call it,
+    // and store its return value in p->trapframe->a0
+    p->trapframe->a0 = syscalls[num]();  // 实际执行系统调用
+  } else {
+    printf("%d %s: unknown sys call %d\n",
+            p->pid, p->name, num);
+    p->trapframe->a0 = -1;
+  }
+}
+```
+```num = p->trapframe->a7;```读取系统调用对应参数,用gdb查看num
+```sh
+(gdb) p num
+$1 = 7
+```
+查看***syscall.h*** ，知道7对应的是系统调用```exec```
+```c
+// part of syscall.h
+#define SYS_exec    7
+```
+
+6. 继续往下执行代码，跳入```p->trapframe->a0 = syscall[num]() ；```中(num=7)
+```sh
+(gdb) n
+141	    p->trapframe->a0 = syscalls[num]();
+(gdb) s
+sys_exec () at kernel/sysfile.c:441
+441	  argaddr(1, &uargv);
+```
+查看***sysfile.c*** 相关代码：
+```c
+// part of sysfile.c
+uint64
+sys_exec(void)
+{
+  char path[MAXPATH], *argv[MAXARG];
+  int i;
+  uint64 uargv, uarg;
+
+  argaddr(1, &uargv);  // 441行
+  if(argstr(0, path, MAXPATH) < 0) {
+    return -1;
+  }
+  memset(argv, 0, sizeof(argv));  // 为参数分配空间
+  for(i=0;; i++){
+    if(i >= NELEM(argv)){
+      goto bad;
+    }
+    if(fetchaddr(uargv+sizeof(uint64)*i, (uint64*)&uarg) < 0){
+      goto bad;
+    }
+    if(uarg == 0){
+      argv[i] = 0;
+      break;
+    }
+    argv[i] = kalloc();
+    if(argv[i] == 0)
+      goto bad;
+    if(fetchstr(uarg, argv[i], PGSIZE) < 0)
+      goto bad;
+  }
+
+  int ret = exec(path, argv);
+
+  for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
+    kfree(argv[i]);
+
+  return ret;
+
+ bad:
+  for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
+    kfree(argv[i]);
+  return -1;
+}
+
+```
+```sys_exec```中的第一件事情是从用户空间读取参数，它会读取```path```，也就是要执行程序的文件名。这里首先会为参数分配空间，然后从用户空间将参数拷贝到内核空间。
+```memset```后打印path:
+```sh
+(gdb) n
+445	  memset(argv, 0, sizeof(argv));
+(gdb) p path
+$4 = "/init\...
+```
+可以看到传入的就***是init***程序。所以，综合来看，**```initcode```完成了通过```exec```调用 ***init*** 程序**。
+
+7. 查看***user/init.c*** 代码
+```c {.line-numbers}
+// init: The initial user-level program
+
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "kernel/spinlock.h"
+#include "kernel/sleeplock.h"
+#include "kernel/fs.h"
+#include "kernel/file.h"
+#include "user/user.h"
+#include "kernel/fcntl.h"
+
+char *argv[] = { "sh", 0 };
+
+int
+main(void)
+{
+  int pid, wpid;
+
+  if(open("console", O_RDWR) < 0){
+    mknod("console", CONSOLE, 0);
+    open("console", O_RDWR);            // 配置console
+  }
+  dup(0);  // stdout
+  dup(0);  // stderr
+
+  for(;;){
+    printf("init: starting sh\n");
+    pid = fork();
+    if(pid < 0){
+      printf("init: fork failed\n");
+      exit(1);
+    }
+    if(pid == 0){
+      exec("sh", argv);  // 调用shell
+      printf("init: exec sh failed\n");
+      exit(1);
+    }
+
+    for(;;){
+      // this call to wait() returns if the shell exits,
+      // or if a parentless process exits.
+      wpid = wait((int *) 0);
+      if(wpid == pid){
+        // the shell exited; restart it.
+        break;
+      } else if(wpid < 0){
+        printf("init: wait returned an error\n");
+        exit(1);
+      } else {
+        // it was a parentless process; do nothing.
+      }
+    }
+  }
+}
+```
+可以看到***init***会为用户空间设置好一些东西，比如配置好console，调用```fork```，并在```fork```出的子进程中执行shell。
+继续运行即可看到shell运行起来了。
