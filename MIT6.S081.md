@@ -3075,6 +3075,37 @@ int             copyin_new(pagetable_t, char *, uint64, uint64);
 int             copyinstr_new(pagetable_t, char *, uint64, uint64);
 ```
 
+**测试结果：**
+测试时发现bug导致xv6无法启动
+```sh
+hart 2 starting
+hart 1 starting
+scause 0x000000000000000d
+sepc=0x000000008000668c stval=0x0000000000000024
+panic: kerneltrap
+QEMU: Terminated
+```
+解决方法：
+在***proc.c***:```userinit()```函数中也添加对```uvm2kvmcopy```的调用
+```c
+// Set up first user process.
+void
+userinit(void)
+{
+  //...
+  p->state = RUNNABLE;
+
+  
+  // 将用户进程地址映射至用户内核页表中
+   setupuvm2kvm(p->pagetable, p->ex_kernel_pagetable, 0, p->sz);
+
+  release(&p->lock);
+}
+```
+可以正常启动，开始测试, 在项目目录下运行```make grade```
+![lab3final](./image/MIT6.S081/lab3final)
+
+
 #  Lec05 Calling conventions and stack frames RISC-V
 [阅读材料](https://xv6.dgs.zone/tranlate_books/Calling%20Convention.html)
 * ```long```和指针```void*```都与整数寄存器位数一致，所以在RV32中，两者都是32位，而在RV64中，两者都是64位。
