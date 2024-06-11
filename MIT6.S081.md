@@ -3103,9 +3103,78 @@ userinit(void)
 }
 ```
 可以正常启动，开始测试, 在项目目录下运行```make grade```
-![lab3final](./image/MIT6.S081/lab3final)
+![lab3final](./image/MIT6.S081/lab3final.png)
 
 
 #  Lec05 Calling conventions and stack frames RISC-V
 [阅读材料](https://xv6.dgs.zone/tranlate_books/Calling%20Convention.html)
 * ```long```和指针```void*```都与整数寄存器位数一致，所以在RV32中，两者都是32位，而在RV64中，两者都是64位。
+
+## 5.3 gdb和汇编代码执行
+gdb调试实验检查```sum_to```函数
+```c
+.section .text
+.global sum_to
+
+/* 
+int sum_to(int n) {
+  int acc = 0;
+  for (int i = 0; i <=n; i++) {
+    acc +=1;
+  }
+  return acc;
+}
+ */
+
+ sum_to:
+    mv t0, a0            # t0 <- a0
+    li a0, 0             # a0 <- 0
+  loop:
+    ad a0, a0, t0        # a0 <- a0 + t0
+    addi t0, t0, -1      # to <- t0 - 1
+    bnez t0, loop        # if t0 != 0: pc <- loop
+    ret
+```
+gdb显示resource窗口： ```tui enable```
+在resource窗口显示汇编代码：```layout asm```
+显示寄存器内容：```layout reg```
+显示c代码和汇编：```layout split```
+只显示c：```layout source```
+聚焦于汇编分窗口便于滚动：```focus asm```
+step into: ```si```
+查看从当前调用栈开始的所有Stack Frame：```bt```  或 ```backtrace```
+查看所有tui指令：```apropos tui```
+
+**tmux快捷键：**
+```Ctrl-b``` +:
+```c```: 创建新窗口
+```%```: 垂直分屏
+```"```: 水平分屏
+```o```: 切换窗格
+```p```: 前一个窗口
+```n```: 后一个窗口
+```x```: 关闭窗格
+```!```: 取消所有窗格保留当前窗格
+```d```: 离开回话，返回shell
+```Ctrl-Z```: 挂起回话，返回shell
+
+## 5.4 RISC-V寄存器
+*  寄存器是位于处理器内部的一种高速存储器，用于临时存放指令、数据和地址等信息。数量有限，访问速度块。
+![reg](./image/MIT6.S081/register.png)
+*  **Caller** Saved寄存器在函数调用的时候**不会保存**, 作为调用方的函数要小心可能的数据**可能的变化**
+   **Callee** Saved寄存器在函数调用的时候**会保存**，作为被调用方的函数要小心寄存器的值**不会相应的变化**
+* 汇编代码并不是在内存上执行，而是在寄存器上执行
+* a0到a7寄存器是用来作为函数的参数。如果一个函数有超过8个参数，我们就需要用内存了。
+* 当可以使用寄存器的时候，我们不会使用内存，我们只在不得不使用内存的场景才使用它。
+
+## 5.5 栈(Stack)
+![stack](./image/MIT6.S081/Stack.png)
+* 栈结构图中，每个区域都是一个Stack Frame，每一次执行函数调用就会产生一个**专属**的Stack Frame。函数通过移动Stack Pointer来完成Stack Frame的空间分配。
+* Stack是从高地址开始向低地址使用。所以栈总是**向下增长**。
+* 如果函数的参数**多于8个**，额外的参数会出现在Stack中。所以Stack Frame**大小并不总是一样**。
+* Stack Frame中有两个重要的寄存器，第一个是**SP（Stack Pointer）**，它指向Stack的底部并代表了当前Stack Frame的位置。第二个是**FP（Frame Pointer）**，它指向当前Stack Frame的顶部。
+* 指向前一个Stack Frame的指针会出现在栈中的固定位置。保存前一个Stack Frame的指针的原因是为了让我们能跳转回去。所以当前函数返回时，我们可以将前一个Frame Pointer存储到FP寄存器中。所以我们使用Frame Pointer来操纵我们的Stack Frames，并确保我们总是指向正确的函数。
+* Stack Frame必须要**被汇编代码创建**，所以是编译器生成了汇编代码，进而创建了Stack Frame。
+
+## 5.6 Struct
+*  struct在内存中是一段**连续**的地址。可以认为struct像是一个数组，但是里面的不同字段的类型可以不一样。
