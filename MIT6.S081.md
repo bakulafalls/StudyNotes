@@ -422,7 +422,7 @@ index 83dd513..c96dab0 100644
 ***显示当前进程***：```Ctrl-p```
 
 ## Task2 Sleep
-<span style="background-color:lightgreen;">实现xv6的UNIX程序```sleep```：您的```sleep```应该暂停到用户指定的计时数。一个滴答(tick)是由xv6内核定义的时间概念，即来自定时器芯片的两个中断之间的时间。您的解决方案应该在文件***user/sleep.c***中。</span>
+<span style="background-color:green;">实现xv6的UNIX程序```sleep```：您的```sleep```应该暂停到用户指定的计时数。一个滴答(tick)是由xv6内核定义的时间概念，即来自定时器芯片的两个中断之间的时间。您的解决方案应该在文件***user/sleep.c***中。</span>
 
 **提示：**
 * 在你开始编码之前，请阅读《book-riscv-rev1》的第一章
@@ -672,7 +672,7 @@ int main(int argc, char const *argv[])
 ```
 
 ## Task3 Pingpong
-<span style="background-color:lightgreen;">编写一个使用UNIX系统调用的程序来在两个进程之间“ping-pong”一个字节，请使用两个管道，每个方向一个。父进程应该向子进程发送一个字节;子进程应该打印“\<pid>: received ping”，其中\<pid>是进程ID，并在管道中写入字节发送给父进程，然后退出;父级应该从读取从子进程而来的字节，打印“\<pid>: received pong”，然后退出。您的解决方案应该在文件```user/pingpong.c```中。</span>
+<span style="background-color:green;">编写一个使用UNIX系统调用的程序来在两个进程之间“ping-pong”一个字节，请使用两个管道，每个方向一个。父进程应该向子进程发送一个字节;子进程应该打印“\<pid>: received ping”，其中\<pid>是进程ID，并在管道中写入字节发送给父进程，然后退出;父级应该从读取从子进程而来的字节，打印“\<pid>: received pong”，然后退出。您的解决方案应该在文件```user/pingpong.c```中。</span>
 
 **提示：**
 * Use ```pipe``` to create a pipe.
@@ -768,7 +768,7 @@ main(int argc, char const *argv[])
 ![Alt text](./image/MIT6.S081/pingpong.png)
 
 ## Task4 Primes(Moderate/Hard)
-<span style="background-color:lightgreen;">使用管道编写```prime sieve```(筛选素数)的并发版本。这个想法是由Unix管道的发明者Doug McIlroy提出的。请查看[这个网站](https://swtch.com/~rsc/thread/)，该网页中间的图片和周围的文字解释了如何做到这一点。您的解决方案应该在***user/primes.c***文件中。</span>
+<span style="background-color:green;">使用管道编写```prime sieve```(筛选素数)的并发版本。这个想法是由Unix管道的发明者Doug McIlroy提出的。请查看[这个网站](https://swtch.com/~rsc/thread/)，该网页中间的图片和周围的文字解释了如何做到这一点。您的解决方案应该在***user/primes.c***文件中。</span>
 你的目标是使用```pipe```和```fork```来设置管道。第一个进程将数字2到35输入管道。对于每个素数，您将安排创建一个进程，该进程通过一个管道从其左邻居读取数据，并通过另一个管道向其右邻居写入数据。由于xv6的文件描述符和进程数量有限，因此第一个进程可以在35处停止。
 
 **参考资料翻译：**
@@ -925,7 +925,7 @@ main(int argc, char const *argv[])
 ![Alt text](./image/MIT6.S081/primes.png)
 
 ## Task5 Find(Moderate)
-<span style="background-color:lightgreen;">写一个简化版本的UNIX的```find```程序：查找目录树中具有特定名称的所有文件，你的解决方案应该放在***user/find.c***.</span>
+<span style="background-color:green;">写一个简化版本的UNIX的```find```程序：查找目录树中具有特定名称的所有文件，你的解决方案应该放在***user/find.c***.</span>
 
 **提示：**
 * 查看***user/ls.c***文件学习如何读取目录
@@ -1127,7 +1127,7 @@ main(int argc, char *argv[])
 ![Alt text](./image/MIT6.S081/find.png)
 
 ## Task6 xargs(Moderate)
-<span style="background-color:lightgreen;">编写一个简化版UNIX的```xargs```程序：它从标准输入中按行读取，并且为每一行执行一个命令，将行作为参数提供给命令。你的解决方案应该在***user/xargs.c***</span>
+<span style="background-color:green;">编写一个简化版UNIX的```xargs```程序：它从标准输入中按行读取，并且为每一行执行一个命令，将行作为参数提供给命令。你的解决方案应该在***user/xargs.c***</span>
 
 **示例1：**
 ```sh
@@ -1943,7 +1943,7 @@ $ make clean
 ```
 
 ## Task1 System call tracing（moderate）
-<span style="background-color:lightgreen;">在本作业中，您将添加一个系统调用跟踪功能，该功能可能会在以后调试实验时对您有所帮助。您将创建一个新的```trace```系统调用来控制跟踪。它应该有一个参数，这个参数是一个整数“掩码”（mask），它的比特位指定要跟踪的系统调用。例如，要跟踪```fork```系统调用，程序调用```trace(1 << SYS_fork)```，其中```SYS_fork```是***kernel/syscall.h***中的系统调用编号。如果在掩码中设置了系统调用的编号，则必须修改xv6内核，以便在每个系统调用即将返回时打印出一行。该行应该包含进程id、系统调用的名称和返回值；您不需要打印系统调用参数。```trace```系统调用应启用对调用它的进程及其随后派生的任何子进程的跟踪，但不应影响其他进程。</span>
+<span style="background-color:green;">在本作业中，您将添加一个系统调用跟踪功能，该功能可能会在以后调试实验时对您有所帮助。您将创建一个新的```trace```系统调用来控制跟踪。它应该有一个参数，这个参数是一个整数“掩码”（mask），它的比特位指定要跟踪的系统调用。例如，要跟踪```fork```系统调用，程序调用```trace(1 << SYS_fork)```，其中```SYS_fork```是***kernel/syscall.h***中的系统调用编号。如果在掩码中设置了系统调用的编号，则必须修改xv6内核，以便在每个系统调用即将返回时打印出一行。该行应该包含进程id、系统调用的名称和返回值；您不需要打印系统调用参数。```trace```系统调用应启用对调用它的进程及其随后派生的任何子进程的跟踪，但不应影响其他进程。</span>
 
 **示例输出：**
 ```sh
@@ -2086,7 +2086,7 @@ char const *syscall_names[] = {"fork", "exit", "wait", "pipe", "read",
 ![traeresult](./image/MIT6.S081/trace.png)
 
 ## Task2 Sysinfo (moderate)
-<span style="background-color:lightgreen;">在这个作业中，您将添加一个系统调用```sysinfo```，它收集有关正在运行的系统的信息。系统调用采用一个参数：一个指向```struct sysinfo```的指针（参见***kernel/sysinfo.h***）。内核应该填写这个结构的字段：```freemem```字段应该设置为空闲内存的字节数，```nproc```字段应该设置为```state```字段不为```UNUSED```的进程数。我们提供了一个测试程序***sysinfotest***；如果输出“```sysinfotest: OK```”则通过。</span>
+<span style="background-color:green;">在这个作业中，您将添加一个系统调用```sysinfo```，它收集有关正在运行的系统的信息。系统调用采用一个参数：一个指向```struct sysinfo```的指针（参见***kernel/sysinfo.h***）。内核应该填写这个结构的字段：```freemem```字段应该设置为空闲内存的字节数，```nproc```字段应该设置为```state```字段不为```UNUSED```的进程数。我们提供了一个测试程序***sysinfotest***；如果输出“```sysinfotest: OK```”则通过。</span>
 
 **提示：**
 
@@ -2240,7 +2240,8 @@ void numproc(uint64*);
 * CPU 在执行转换时会在硬件中遍历三级结构，所以缺点是 CPU 必须从内存中加载三个 PTE 以将虚拟地址转换为物理地址。为了减少从物理内存加载 PTE 的开销，RISC-V CPU 将最近使用的页表条目缓存在 **Translation Look-aside Buffer (TLB)** 中。
 * 为了告诉硬件使用页表，内核必须将根页表页的物理地址写入到```satp```寄存器中（```satp```的作用是存放***当前使用的***根页表页在物理内存中的地址）。每个CPU都有自己的```satp```，一个CPU将使用自己的```satp```指向的页表转换后续指令生成的所有地址。每个CPU都有自己的```satp```，因此不同的CPU就可以运行不同的进程，每个进程都有自己的页表描述的私有地址空间。
 * **物理内存**是指DRAM中的存储单元。物理内存以一个字节为单位划为地址，称为物理地址。**指令只使用虚拟地址**，分页硬件将其转换为物理地址，然后将其发送到DRAM硬件来进行读写。与物理内存和虚拟地址不同，**虚拟内存不是物理对象** ，而是指内核提供的管理物理内存和虚拟地址的抽象和机制的集合。（注意区分）
- ###  3.2 内核地址空间
+
+###  3.2 内核地址空间
 * 内核除了为每个进程维护一个页表外，还会有一个 单独的页表用来描述**内核地址空间（Kernel address space）**。 xv6内核内存布局声明见***kernel/memlayout.h***
 <a id="fig3.3"></a>
 ![adress2](./image/MIT6.S081/adrres2.png)
@@ -2491,7 +2492,7 @@ $ make clean
 ```
 
 ## Task1 Print a page table 
-<span style="background-color:lightgreen;">定义一个名为```vmprint()```的函数。它应当接收一个```pagetable_t```作为参数，并以下面描述的格式打印该页表。在***exec.c***中的```return argc```之前插入```if(p->pid==1) vmprint(p->pagetable)```，以打印第一个进程的页表。如果你通过了```pte printout```测试的```make grade```，你将获得此作业的满分。</span>
+<span style="background-color:green;">定义一个名为```vmprint()```的函数。它应当接收一个```pagetable_t```作为参数，并以下面描述的格式打印该页表。在***exec.c***中的```return argc```之前插入```if(p->pid==1) vmprint(p->pagetable)```，以打印第一个进程的页表。如果你通过了```pte printout```测试的```make grade```，你将获得此作业的满分。</span>
 启动xv6时，它应该像这样打印输出来描述第一个进程刚刚完成```exec()``` ing ```init```时的页表：
 ```sh
 page table 0x0000000087f6e000
@@ -2589,7 +2590,7 @@ void            vmprint(pagetable_t);
 
 ## Task2  A kernel page table per process (hard)
 Xv6有一个单独的用于在内核中执行程序时的内核页表。内核页表直接映射（恒等映射）到物理地址，也就是说内核虚拟地址```x```映射到物理地址仍然是```x```。Xv6还为每个进程的用户地址空间提供了一个单独的页表，只包含该进程用户内存的映射，从虚拟地址0开始。因为内核页表不包含这些映射，所以用户地址在内核中无效。因此，当内核需要使用在系统调用中传递的用户指针（例如，传递给```write()```的缓冲区指针）时，内核必须首先将指针转换为物理地址。本节和下一节的目标是允许内核直接解引用用户指针。
-<span style="background-color:lightgreen;">你的第一项工作是修改内核来让每一个进程在内核中执行时使用它自己的内核页表的副本。修改```struct proc```来为每一个进程维护一个内核页表，修改调度程序使得切换进程时也切换内核页表。对于这个步骤，每个进程的内核页表都应当与现有的的全局内核页表完全一致。如果你的```usertests```程序正确运行了，那么你就通过了这个实验。</span>
+<span style="background-color:green;">你的第一项工作是修改内核来让每一个进程在内核中执行时使用它自己的内核页表的副本。修改```struct proc```来为每一个进程维护一个内核页表，修改调度程序使得切换进程时也切换内核页表。对于这个步骤，每个进程的内核页表都应当与现有的的全局内核页表完全一致。如果你的```usertests```程序正确运行了，那么你就通过了这个实验。</span>
 
 **提示：**
 1. 在```struct proc```中为进程的内核页表增加一个字段
@@ -3160,6 +3161,7 @@ step into: ```si```
 
 ## 5.4 RISC-V寄存器
 *  寄存器是位于处理器内部的一种高速存储器，用于临时存放指令、数据和地址等信息。数量有限，访问速度块。
+<a id="reg"></a>
 ![reg](./image/MIT6.S081/register.png)
 *  **Caller** Saved寄存器在函数调用的时候**不会保存**, 作为调用方的函数要小心可能的数据**可能的变化**
    **Callee** Saved寄存器在函数调用的时候**会保存**，作为被调用方的函数要小心寄存器的值**不会相应的变化**
@@ -3178,3 +3180,341 @@ step into: ```si```
 
 ## 5.6 Struct
 *  struct在内存中是一段**连续**的地址。可以认为struct像是一个数组，但是里面的不同字段的类型可以不一样。
+
+# Lec06 Lec06 Isolation & system call entry/exit
+预习内容：
+书第4章(除4.6)、 ```riscv.h```、 ```trampoline.S```、 ```trap.c``` 
+## 看书预习——第四章 陷阱指令和系统调用
+* 有三种事件会导致CPU搁置普通指令的执行，使用户空间和内核空间切换：
+1. **系统调用**，用户程序执行```ecall```
+2. **异常**，用户/内核指令作出非法操作(除以0、使用无效的虚拟地址)
+3. **设备中断**，例如当磁盘硬件完成读或写请求时，向系统表明它需要被关注
+书里将这些情况称为**陷阱(trap)**
+* 陷阱发生时正在执行的任何代码都需要稍后恢复，并且不需要意识到发生了任何特殊的事情。(陷阱是**透明**的)
+* 陷阱发生的顺序：
+1. 陷阱强制将控制权转移到内核；
+1. 内核保存寄存器和其他状态，以便可以恢复执行；
+1. 内核执行适当的处理程序代码（例如，系统调用接口或设备驱动程序）；
+1. 内核恢复保存的状态并从陷阱中返回；
+1. 原始代码从它停止的地方恢复
+* xv6陷阱处理分为四个阶段：
+1. RISC-V CPU采取的硬件操作；
+1. 为内核C代码执行而准备的汇编程序集“向量”；
+1. 决定如何处理陷阱的C陷阱处理程序；
+1. 系统调用或设备驱动程序服务例程
+
+### 4.1 RISC-V陷入机制
+* 每个RISC-V CPU都有一组控制寄存器，**内核通过向这些寄存器写入内容来告诉CPU如何处理陷阱**，一些重要寄存器概述如下：
+1. ```stvec```（Supervisor Trap Vector Base Address Register）：内核在这里写入其陷阱处理程序的地址；RISC-V跳转到这里处理陷阱。
+1. ```sepc```（Supervisor Exception Program Counter）：当发生陷阱时，RISC-V会在这里保存程序计数器```pc```（Program Counter Register）（因为```pc```会被```stvec```覆盖）。```sret```（从陷阱返回）指令会将```sepc```复制到```pc```。内核可以写入```sepc```来控制```sret```的去向。
+1. ```scause```： RISC-V在这里放置一个描述陷阱原因的数字。
+1. ```sscratch```（Supervisor Scratch Register）：内核在这里放置了一个值，这个值在陷阱处理程序一开始就会派上用场。（存放trapframe地址）。它指向```process->trapframe```(在***proc.h***中可以看到结构体定义)
+1. ```sstatus```：其中的**SIE**位控制设备中断是否启用。如果内核清空SIE，RISC-V将推迟设备中断，直到内核重新设置**SIE**。**SPP**位指示陷阱是来自用户模式还是管理模式，并控制```sret```返回的模式。
+* **SIE**是```sstatus``` 寄存器中的一个控制位，用于控制设备中断
+* 当需要强制执行陷阱时，RISC-V硬件对所有陷阱类型（计时器中断除外）执行以下操作：
+1. 如果陷阱是设备中断，并且状态**SIE**位被清空，则不执行以下任何操作。
+1. 清除**SIE**以禁用中断。
+1. 将```pc```复制到```sepc```。
+1. 将当前模式（用户或管理）保存在状态的**SPP**位中。
+1. 设置```scause```以反映产生陷阱的原因。
+1. 将模式设置为管理模式。
+1. 将```stvec```复制到```pc```。
+1. 在新的```pc```上开始执行。
+
+* CPU**不会切换到内核页表，不会切换到内核栈，也不会保存除``pc``之外的任何寄存器**。内核软件必须执行这些任务。
+* 在陷阱处理中使用专门的寄存器```stvec```切换到内核指定的指令地址是为了保护**用户/内核的隔离机制**
+
+### 4.2 从用户空间陷入 ——ecall/非法/设备中断
+* 来自用户代码的陷阱比来自内核的陷阱**更具挑战性**，因为```satp```指向不映射内核的用户页表，**栈指针**可能包含无效甚至恶意的值。
+* ```uservec```必须在内核页表中与用户页表中映射相同的地址
+* <span style="background-color:red;">流程比较复杂，直接看书不太好理解，后面直接做课程笔记吧，这样写比较有条理</span>
+
+## 6.1 Trap机制
+*  **用户**应用程序可以使用全部的**寄存器**（不包括上面提到的控制寄存器）
+*  为了让用户程序在中段后能够恢复，很明显我们需要在某处保存32个用户寄存器的值、程序计数器；将mode改为supervisor mode；将SATP指向kernel page table以便之后运行内核代码；将堆栈寄存器指向位于内核的一个地址，因为我们需要一个堆栈来调用内核的C函数；当所有硬件状态适合在内核中使用时，跳入内核的C代码
+* trap机制只保存来自用户空间的东西，而不查看（隔离性、安全性）
+* supervisor mode 比 user mode 多出的权限：
+1. 可以读写控制寄存器（SATP、STVEC、SEPC、SSCRATCH）
+1. 可以使用PTE_U标志位为0的PTE
+仅这两点而已
+* <span style="background-color:red;">SATP指向的page table中PTE_U=1，那么supervisor mode不能使用那个地址。</span> --Robert说的，需考证 
+
+## 6.2 Trap代码执行流程
+![TRAP_FLOW](./image/MIT6.S081/trap_flow.png)
+***
+Q：这个问题或许并不完全相关，read和write系统调用，相比内存的读写，他们的代价都高的多，因为它们需要切换模式，并来回捣腾。有没有可能当你执行打开一个文件的系统调用时， 直接得到一个page table映射，而不是返回一个文件描述符？这样只需要向对应于设备的特定的地址写数据，程序就能通过page table访问特定的设备。你可以设置好限制，就像文件描述符只允许修改特定文件一样，这样就不用像系统调用一样在用户空间和内核空间来回捣腾了。
+
+A：这是个很好的想法。实际上很多操作系统都提供这种叫做内存映射文件（Memory-mapped file access）的机制，在这个机制里面通过page table，可以将用户空间的虚拟地址空间，对应到文件内容，这样你就可以通过内存地址直接读写文件。实际上，你们将在mmap 实验中完成这个机制。对于许多程序来说，这个机制的确会比直接调用read/write系统调用要快的多。
+***
+
+## 6.3 gdb调试观察ecall执行前后的状态
+跟踪一个XV6的系统调用，也就是Shell将它的提示信息通过```write```系统调用走到操作系统再输出到console的过程。
+```c
+int getcmd(cahr *buf, int nbuf)
+{
+  write(2, "$", "2");  // 跟踪这一行
+
+  // ...
+}
+```
+启动xv6和gdb, 首先在ecall指令处放一个断点，ecall指令的地址通过查看由XV6编译过程产生的```sh.asm```找出：
+![trap_gdb1](./image/MIT6.S081/trap_gdb1.png)
+试着打印程序计数器```pc```，输入```info reg```打印全部32个寄存器
+![trap_gdb2](./image/MIT6.S081/trap_gdb2.png)
+可以看到程序计数器（```pc```）和堆栈指针（```sp```）的地址现在都在距离0比较近的地址，这进一步印证了当前代码运行在用户空间，因为用户空间中所有的地址都比较小。
+QEMU中可以打印当前的page table，输入```ctrl a + c```可以进入到QEMU的console，之后输入```info mem```，QEMU会打印完整的page table。
+![info_mem](./image/MIT6.S081/info_mem.png)
+如果启动qemu时设置```CPUS=1```,这里应该会只有6个PTE,重启验证一下
+<a id="before_ecall"></a>
+![info_mem2](./image/MIT6.S081/info_mem2.png)
+这6个映射按shell指令的顺序排列
+a表示该PTE条目是否被访问(acessed)过，d表示是否曾经对该地址写入(dirty)
+最后两个PTE的地址很大，接近虚拟地址空间的顶部，它们就是trampoline和trapframe页面，可以看到用户代码不允许访问它们
+接下来打印write函数的内容：
+![x_write](./image/MIT6.S081/x_write.png)
+程序计数器现在指向```ecall```指令，我们接下来要执行```ecall```指令。现在我们还在**用户空间**，但是马上我们就要进入**内核空间**了。
+***
+执行```ecall```指令并通过打印```pc```查看现在在哪里
+<a id="printpc"></a>
+![si_ecall](./image/MIT6.S081/step_in_ecall.png)
+可以看到现在程序计数器到了一个大的多的地址，之前在```0xe12```
+查看pagetable:
+![info_mem3](./image/MIT6.S081/info_mem3.png)
+可以看到page table没有变
+查看现在将要运行的指令：
+![csrrw](./image/MIT6.S081/csrrw.png)
+查看寄存器：
+![reg_after](./image/MIT6.S081/reg_after.png)
+与[执行ecall前的寄存器](#before_ecall)比较，发现寄存器的值并没有改变，这里还是用户程序拥有的一些寄存器内容。
+在将寄存器数据保存在某处之前，**我们在这个时间点不能使用任何寄存器**，否则的话我们是没法恢复寄存器数据的。如果内核在这个时间点使用了任何一个寄存器，内核会覆盖寄存器内的用户数据，之后如果我们尝试要恢复用户程序，我们就不能恢复寄存器中的正确数据，用户程序的执行也会相应的出错。
+现在所在的地址```0x3ffffff000```为上面pagetable中最后一个page，也就是**trampoline page**，它包含了内核的**trap处理代码**。
+由于现在pagetable仍然还是用户的pagetable，所以我们需要在user page table中的某个地方来执行最初的内核代码。trampoline page由内核小心地映射到每一个user page table中，以使得当我们仍然在使用user page table时，内核在一个地方能够执行trap机制的最开始的一些指令。
+查看stvec寄存器存放的地址：
+![print_stvec](./image/MIT6.S081/print_stvec.png)
+按书中所说，内核已经事先了stvec寄存器指向trampoline page的起始位置，这也是执行完```ecall```指令后，现在位于该地址的原因。
+***
+**总结一下```ecall```做了什么：**
+1. 将代码从user mode改为supervisor mode
+1. 将```pc```的值保存在```sepc```寄存器,[见上图](#printpc)。将原来pc的值保存在```sepc```寄存器:
+![](./image/MIT6.S081/print_sepc.png)
+可以看到其中保存了之前ecall指令在用户空间的地址
+1. 跳转到stvec寄存器指向的指令
+
+**对于RISC-V，```ecall```不会做，所以接下来需要用软件完成的事：**
+1. 我们需要保存32个用户寄存器的内容，这样当我们想要恢复用户代码执行时，我们才能恢复这些寄存器的内容。
+
+1. 因为现在我们还在user page table，我们需要切换到kernel page table。
+
+1. 我们需要创建或者找到一个kernel stack，并将Stack Pointer寄存器的内容指向那个kernel stack。这样才能给C代码提供栈。
+
+1. 我们还需要跳转到内核中C代码的某些合理的位置。
+***
+为了保存用户寄存器，XV6在RISC-V上通过两部分实现：
+1. XV6在每个user page table映射了trapframe page，这样每个进程都有自己的trapframe page。trapframe page指向了一个可以用来存放这个进程的用户寄存器的内存位置,这个位置的虚拟地址总是```0x3ffffffe000```，这是由内核设置好了的。
+1. 进入到user space之前，内核会将trapframe page的地址（```0x3fffffe000```）保存在SSCRATCH寄存器中。进入到内核空间后，***uservec***的第一句代码便是交换```a0```和```sscratch```两个寄存器的内容。
+
+![](./image/MIT6.S081/sdra.png)
+可以看到执行完```sd  ra,40(a0)```后，```a0```现在的值是```0x3fffffe000```，这是trapframe page的虚拟地址。它之前由内核保存在```SSCRATCH```寄存器中。
+```SSCRATCH```寄存器现在的内容是```2```，这是```a0```寄存器之前保存的```write```函数的第一个参数，在这个场景下，是Shell传入的文件描述符2。
+***
+Q1: trapframe的地址是怎么出现在SSCRATCH寄存器中的？
+A1: 内核在返回到用户空间之前执行的最后两条指令:
+```c
+// end of trampoline.S
+# restore user a0, and save TRAPFRAME in sscratch
+        csrrw a0, sscratch, a0
+        
+        # return to user mode and user pc.
+        # usertrapret() set up sstatus and sepc.
+        sret
+```
+在内核返回到用户空间时，会恢复所有的用户寄存器。之后会再次执行交换指令，```csrrw```。因为之前内核已经设置了```a0```保存的是trap frame地址，经过交换之后```SSCRATCH```仍然指向了trapframe page地址，而```a0```也恢复成了之前的数值。最后```sret```返回到了用户空间。
+
+Q2: ```a0```是如何有trapframe page的地址?
+A2: 内核返回到用户空间的最后的C函数在***trap.c***中：
+```c
+void
+usertrapret(void)
+{
+  //...
+   // jump to trampoline.S at the top of memory, which 
+  // switches to the user page table, restores user registers,
+  // and switches to user mode with sret.
+  uint64 fn = TRAMPOLINE + (userret - trampoline);
+  ((void (*)(uint64,uint64))fn)(TRAPFRAME, satp);
+}
+```
+C函数做的最后一件事情是调用fn函数，传递的参数是```TRAMFRAME```和user page table。在C代码中，当你调用函数，第一个参数会存在```a0```，这就是为什么```a0```里面的数值是指向trapframe的指针。```fn```函数是就是刚刚我向你展示的位于***trampoline.S***中的代码。
+***
+
+让代码继续运行，停在下面的一条ld指令：
+![](./image/MIT6.S081/ldsp.png)
+这条指令正在将a0指向的内存地址往后数的第8个字节开始的数据加载到Stack Pointer寄存器。```a0```的内容现在是trapframe page的地址，从本节第一张图中，trapframe的格式可以看出，第8个字节开始的数据是内核的Stack Pointer（kernel_sp）。trapframe中的kernel_sp是由kernel在进入用户空间之前就设置好的，它的值是这个进程的kernel stack。所以这条指令的作用是**初始化Stack Pointer指向这个进程的kernel stack的最顶端**。
+执行完后查看当前Stack Pointer寄存器：
+![](./image/MIT6.S081/print_sp.png)
+这是这个进程的kernel stack。因为XV6在每个kernel stack下面放置一个guard page，所以kernel stack的地址都比较大。
+下一条指令```ld tp, 32(a0)```是向```tp```寄存器写入当前**CPU核的编号**,可以看到结果为0（我们启动时设定了CPUS=1）.
+再下一条指令```ld t0, 16(a0)```是向```t0```寄存器写入我们将要执行的第一个C函数的指针，也就是函数 **```usertrap```的指针**。
+![](./image/MIT6.S081/print_t0.png)
+再下一条指令```ld t1, 0(a0)```是向```t1```寄存器写入**kernel page table的地址**
+![](./image/MIT6.S081/print_t1.png)
+下面的指令```csrw satp, t1```是交换```SATP```和```t1```寄存器。
+这条指令执行完成之后，当前程序会从user page table切换到kernel page table:
+![](./image/MIT6.S081/csrw.png)
+至此为止，Stack Pointer指向了kernel stack，我们有了kernel page table，可以读取kernel data。我们已经准备好了执行内核中的C代码了。
+***
+Q: 什么代码没有崩溃？毕竟我们在内存中的某个位置执行代码，程序计数器保存的是虚拟地址，如果我们切换了page table，为什么同一个虚拟地址不会通过新的page table寻址走到一些无关的page中？
+A: 因为我们还在trampoline代码中，而trampoline代码在用户空间和内核空间都映射到了同一个地址(见[第四章](#fig3.3),trampoline在内核页表与用户页表中具有相同的映射)。因此我们在切换page table时，寻址的结果不会改变，我们实际上就可以继续在同一个代码序列中执行程序而不崩溃。
+***
+最后一条指令是```jr t0```，作用是跳转到t0指向的函数```usertrap```。接下来```step in```查看***trap.c***:```usertrap()```
+![](./image/MIT6.S081/trap.c.png)
+它做的第一件事情是更改STVEC寄存器。取决于trap是来自于用户空间还是内核空间，实际上XV6处理trap的方法是不一样的。目前为止，我们只讨论过当trap是由用户空间发起时会发生什么。如果trap从内核空间发起，将会是一个非常不同的处理流程，因为从内核发起的话，程序已经在使用kernel page table。所以当trap发生时，程序执行仍然在内核的话，很多处理都不必存在。
+
+<details>
+    <summary><span style="color:lightblue;">查看usertrap的逐行解释</span> </summary>
+
+```c {.line-numbers}
+//
+// handle an interrupt, exception, or system call from user space.
+// called from trampoline.S
+//
+void
+usertrap(void)
+{
+  int which_dev = 0;
+
+  if((r_sstatus() & SSTATUS_SPP) != 0)
+    panic("usertrap: not from user mode");
+
+  // send interrupts and exceptions to kerneltrap(),
+  // since we're now in the kernel.
+  w_stvec((uint64)kernelvec);  // 先将STVEC指向了kernelvec内核空间trap处理代码的位置，确保现在在内核发生中断或异常时能正常处理
+
+  struct proc *p = myproc();
+  
+  // save user program counter.
+  p->trapframe->epc = r_sepc();  // 保存用户程序计数器以防止 切换到新的进程进行系统调用 导致SEPC寄存器的内容被覆盖
+  
+  if(r_scause() == 8){  // 找出我们现在会在usertrap函数的原因, 8代表系统调用
+    // system call
+
+    if(p->killed)
+      exit(-1);
+
+    // sepc points to the ecall instruction,
+    // but we want to return to the next instruction.
+    p->trapframe->epc += 4;  // 最后返回ecall的下一条指令而不是重新执行ecall
+
+    // an interrupt will change sstatus &c registers,
+    // so don't enable until done with those registers.
+    intr_on();  // 有些系统调用需要许多时间处理。中断总是会被RISC-V的trap硬件关闭，所以这里需要显式的打开中断
+
+    syscall();
+  } else if((which_dev = devintr()) != 0){
+    // ok
+  } else {
+    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    p->killed = 1;
+  }
+
+  if(p->killed)
+    exit(-1);
+
+  // give up the CPU if this is a timer interrupt.
+  if(which_dev == 2)
+    yield();
+
+  usertrapret();
+}
+```
+</details>
+
+```usertrap()```最后调用```usertrapret```函数, 其用于进行在返回到用户空间之前内核要做的工作。
+<details>
+    <summary><span style="color:lightblue;">查看usertrapret的逐行解释</span> </summary>
+
+```c {.line-numbers}
+//
+// return to user space
+//
+void
+usertrapret(void)
+{
+  struct proc *p = myproc();
+
+  // we're about to switch the destination of traps from
+  // kerneltrap() to usertrap(), so turn off interrupts until
+  // we're back in user space, where usertrap() is correct.
+  intr_off();  // 关闭中断是因为我们将要更新STVEC寄存器来指向用户空间的trap处理代码,防止因为 仍然在内核执行代码时发生中断 导致内核出错
+
+  // send syscalls, interrupts, and exceptions to trampoline.S
+  w_stvec(TRAMPOLINE + (uservec - trampoline));  // 设置STVEC寄存器指向trampoline代码，在那里最终会执行sret指令返回到用户空间。trampoline代码的最后sret会重新打开中断。
+
+  // set up trapframe values that uservec will need when
+  // the process next re-enters the kernel.
+  p->trapframe->kernel_satp = r_satp();         // kernel page table
+  p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
+  p->trapframe->kernel_trap = (uint64)usertrap;  // usertrap函数指针，使trampoline 代码能跳转至usertrap()
+  p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
+
+  // set up the registers that trampoline.S's sret will use
+  // to get to user space.
+  
+  // set S Previous Privilege mode to User.
+  unsigned long x = r_sstatus();
+  x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode， 其控制了sret指令的行为，该bit为0表示下次执行sret的时候，我们想要返回user mode而不是supervisor mode。
+  x |= SSTATUS_SPIE; // enable interrupts in user mode，在执行完sret之后，打开中断，所以这里将SPIE bit位设置为1。
+  w_sstatus(x);
+
+  // set S Exception Program Counter to the saved user pc.
+  w_sepc(p->trapframe->epc);  //将SEPC寄存器的值设置成之前保存的用户程序计数器的值,该值在usertrap函数中被保存至epc
+
+  // tell trampoline.S the user page table to switch to.
+  uint64 satp = MAKE_SATP(p->pagetable);   // 将page table指针准备好，并将这个指针作为第二个参数传递给汇编代码，这个参数会出现在a1寄存器。
+
+  // jump to trampoline.S at the top of memory, which 
+  // switches to the user page table, restores user registers,
+  // and switches to user mode with sret.
+  uint64 fn = TRAMPOLINE + (userret - trampoline);  // 计算出我们将要跳转到汇编代码的地址,tampoline中的userret函数
+  ((void (*)(uint64,uint64))fn)(TRAPFRAME, satp);  // 将fn指针作为一个函数指针，执行相应的函数（也就是userret函数）并传入两个参数，两个参数存储在a0，a1寄存器中。
+}
+```
+</details>
+
+
+现在程序又执行到了***trampoline.S***：```userret```当中，第一句```csrw satp, a1```会将kernel page table切换回user page table（sfence.vma是清空页表缓存TLB）
+![](./image/MIT6.S081/backtoupt.png)
+下面一段 
+```
+# put the saved user a0 in sscratch, so we
+# can swap it with our a0 (TRAPFRAME) in the last step.
+ld t0, 112(a0)   # a0是trapframe地址（见usertrapret末尾），112(a0)是位于trapframe中的a0寄存器的位置 
+csrw sscratch, t0
+```
+将```SSCRATCH```寄存器恢复成保存好的用户的```a0```寄存器。在这里```a0```是trapframe的地址，因为C代码```usertrapret```函数中将trapframe地址作为第一个参数传递过来了。```112```是```a0```寄存器在trapframe中的位置。先将这个地址里的数值保存在```t0```寄存器中，之后再将```t0```寄存器的数值保存在```SSCRATCH```寄存器中。(*用通用寄存器``t0``中转的原因是不能直接从内存地址读取数据并写入到控制状态寄存器*)
+![](./image/MIT6.S081/a0intpf.png)
+接下来的这些指令将```a0```寄存器指向的trapframe中，之前保存的寄存器的值加载到对应的各个寄存器中。之后，我们离能真正运行用户代码就很近了。
+执行完这一段后，只剩a0寄存器是个例外，它现在仍然是指向trapframe的指针，而不是保存了用户的数据，所以下面的代码
+```
+# restore user a0, and save TRAPFRAME in sscratch
+csrrw a0, sscratch, a0
+```
+交换```SSCRATCH```寄存器和```a0```寄存器的值。交换完成之后，a0持有的是系统调用的返回值，SSCRATCH持有的是trapframe的地址。
+执行完kernel中的最后一条指令```sret```：
+1.  程序会切换回user mode
+
+1. ```SEPC```寄存器的数值会被拷贝到```PC```寄存器（程序计数器）
+
+1. 重新打开中断
+
+回到用户空间后，查看pc寄存器：
+![](./image/MIT6.S081/ret.png)
+查看***sh.asm***可以看到返回的是```write```函数的```ret```指令地址。现在我们回到了shell中。
+
+# Lab4 Traps
+本实验探索如何使用陷阱实现系统调用。您将首先使用栈做一个热身练习，然后实现一个用户级陷阱处理的示例。
+**前置知识：**
+* ```kernel/trampoline.S```：涉及从用户空间到内核空间再到内核空间的转换的程序集
+* ```kernel/trap.c```：处理所有中断的代码
+<span style="background-color:green;">定义一个名为```vmprint()```的函数。它应当接收一个```pagetable_t```作为参数，并以下面描述的格式打印该页表。在***exec.c***中的```return argc```之前插入```if(p->pid==1) vmprint(p->pagetable)```，以打印第一个进程的页表。如果你通过了```pte printout```测试的```make grade```，你将获得此作业的满分。</span>
