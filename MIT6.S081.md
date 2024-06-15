@@ -3993,3 +3993,46 @@ $
 
 1. **make grade**
 ![](./image/MIT6.S081/traps_grade.png)
+
+# Lec08 Page faults
+## 8.1 Page Fault Basics
+* 通过page fault可以实现一系列的功能，包括：
+    1. lazy allocation，这是下一个lab的内容
+    1. copy-on-write fork
+    1. demand paging
+    1. memory mapped files
+* page fault可以让页表的地址**映射关系**变得**动态**起来。通过page fault，内核可以更新page table，这是一个非常强大的功能。结合page table和page fault，内核将会有巨大的**灵活性**。
+* 发生page fault时，内核需要什么样的信息才能够响应page fault
+    1. 出错的虚拟地址(xv6存放在STVAL寄存器中)
+    1. 出错的原因（在SCAUSE寄存器中）
+    1. 触发page fault的指令的地址(在sEPC寄存器、trapframe->epc中)
+
+## 8.2 Lazy page alllocation & Lab5-Task1
+* ```sbrk```系统调用：启动应用程序时指向heap的最底端，会扩展heap的上边界(也就是会扩大heap)
+* 当```sbrk实```际发生或者被调用的时候，内核会分配一些物理内存，并将这些内存映射到用户应用程序的地址空间，然后将内存内容初始化为0，再返回```sbrk```系统调用。
+* 通常来说，应用程序倾向于申请多于自己所需要的内存。因此我们可以利用虚拟内存和page fault handler，实现**lazy allocation** 来解决这个问题。
+* **lazy allocation** 的核心思路：```sbrk```系统调基本上不做任何事情，唯一需要做的事情就是提升```p->sz```，将```p->sz```增加n，其中n是需要新分配的内存page数量。但是内核在这个时间点并不会分配任何物理内存。之后在某个时间点，应用程序使用到了新申请的那部分内存，这时会触发page fault，因为我们还没有将新的内存映射到page table。所以，如果我们解析一个大于旧的```p->sz```，但是又小于新的```p->sz```（注，也就是旧的```p->sz + n```）的虚拟地址，我们希望内核能够分配一个内存page，并且重新执行指令。
+* 在应用程序用光物理内存后，内核可以有两个做法：
+    1. 返回一个错误并杀掉进程 (lazy lab中的做法)
+    1. 
+
+<a id="lab5task1"></a>
+
+**代码实验：**
+1. 首先修改```sys_sbrk```函数，让它只对```p->sz```加n，不执行增加内存的操作
+    ```c
+    uint64
+    sys_sbrk(void)
+    {
+      int addr;
+      int n;
+
+      if (argint(0, &n) < 0)
+        return -1;
+      addr = myproc()->sz;
+      myproc()->sz = myproc()->sz + n;
+      // if (growproc(n) < 0)
+      //  return -1;
+      return addr;
+    }
+    ```
