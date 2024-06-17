@@ -2583,10 +2583,10 @@ int             copyinstr(pagetable_t, char *, uint64, uint64);
 void            vmprint(pagetable_t);
 ```
 
-根据提示，在***exec.c***中的```return argc```之前插入```if(p->pid==1) vmprint(p->pagetable)；```
+根据提示，在***exec.c***中的```return argc```之前插入```if(p->pid==1) vmprint(p->pagetable);```
 **测试结果：**
 ![result](./image/MIT6.S081/printpgtbl.png)
-<span style="background-color:lightblue;">根据书中的 [图3-4](#fig3.4) 解释```vmprint```的输出。page 0包含什么？page 2中是什么？在用户模式下运行时，进程是否可以读取/写入page 1映射的内存？</span>
+<span style="background-color:blue;">根据书中的 [图3-4](#fig3.4) 解释```vmprint```的输出。page 0包含什么？page 2中是什么？在用户模式下运行时，进程是否可以读取/写入page 1映射的内存？</span>
 
 ## Task2  A kernel page table per process (hard)
 Xv6有一个单独的用于在内核中执行程序时的内核页表。内核页表直接映射（恒等映射）到物理地址，也就是说内核虚拟地址```x```映射到物理地址仍然是```x```。Xv6还为每个进程的用户地址空间提供了一个单独的页表，只包含该进程用户内存的映射，从虚拟地址0开始。因为内核页表不包含这些映射，所以用户地址在内核中无效。因此，当内核需要使用在系统调用中传递的用户指针（例如，传递给```write()```的缓冲区指针）时，内核必须首先将指针转换为物理地址。本节和下一节的目标是允许内核直接解引用用户指针。
@@ -4003,20 +4003,22 @@ $
     1. memory mapped files
 * page fault可以让页表的地址**映射关系**变得**动态**起来。通过page fault，内核可以更新page table，这是一个非常强大的功能。结合page table和page fault，内核将会有巨大的**灵活性**。
 * 发生page fault时，内核需要什么样的信息才能够响应page fault
-    1. 出错的虚拟地址(xv6存放在STVAL寄存器中)
-    1. 出错的原因（在SCAUSE寄存器中）
-    1. 触发page fault的指令的地址(在sEPC寄存器、trapframe->epc中)
+    1. 出错的虚拟地址(xv6存放在```stval```寄存器中)
+    1. 出错的原因（在```scause```寄存器中）
+    <a id="pagefault_table"></a>
+    ![pagefault_table](./image/MIT6.S081/pagefault_table.png)
+    1. 触发page fault的指令的地址(在```sepc```寄存器、```trapframe->epc```中)
 
 ## 8.2 Lazy page alllocation & Lab5-Task1
 * ```sbrk```系统调用：启动应用程序时指向heap的最底端，会扩展heap的上边界(也就是会扩大heap)
-* 当```sbrk实```际发生或者被调用的时候，内核会分配一些物理内存，并将这些内存映射到用户应用程序的地址空间，然后将内存内容初始化为0，再返回```sbrk```系统调用。
+* 当```sbrk```实际发生或者被调用的时候，内核会分配一些物理内存，并将这些内存映射到用户应用程序的地址空间，然后将内存内容初始化为0，再返回```sbrk```系统调用。
 * 通常来说，应用程序倾向于申请多于自己所需要的内存。因此我们可以利用虚拟内存和page fault handler，实现**lazy allocation** 来解决这个问题。
 * **lazy allocation** 的核心思路：```sbrk```系统调基本上不做任何事情，唯一需要做的事情就是提升```p->sz```，将```p->sz```增加n，其中n是需要新分配的内存page数量。但是内核在这个时间点并不会分配任何物理内存。之后在某个时间点，应用程序使用到了新申请的那部分内存，这时会触发page fault，因为我们还没有将新的内存映射到page table。所以，如果我们解析一个大于旧的```p->sz```，但是又小于新的```p->sz```（注，也就是旧的```p->sz + n```）的虚拟地址，我们希望内核能够分配一个内存page，并且重新执行指令。
 * 在应用程序用光物理内存后，内核可以有两个做法：
     1. 返回一个错误并杀掉进程 (lazy lab中的做法)
-    1. 
+    1. 见后面的[8.5](#85-demand-paging)
 
-<a id="lab5task1"></a>
+<a id="lab5task1&2"></a>
 
 **代码实验：**
 1. 首先修改```sys_sbrk```函数，让它只对```p->sz```加n，不执行增加内存的操作
@@ -4036,3 +4038,421 @@ $
       return addr;
     }
     ```
+修改完后启动xv6并输入```echo hi```:
+![](./image/MIT6.S081/pagefault1.png)
+这是因为在Shell中执行程序，Shell会先```fork```一个子进程，子进程会通过```exec```执行```echo```（注，详见[1.9](#19-exec-wait系统调用)）。在这个过程中，Shell会申请一些内存，所以Shell会调用```sys_sbrk```，然后就出错了,因为```sys_sbrk```没有实际分配所需要的内存
+观察输出，可以看到：
+* ```scause```寄存器的值是15，表明其是一个pagefault （见[对照表](#pagefault_table)）
+* 进程的pid为3，其很可能为shell的pid
+* ```sepc```寄存器的值为0x1272
+* 出错的虚拟内存地址，即```stval```的值0x4008
+
+在***user/sh.asm***中搜索```sepc```的值1272:
+```s
+void*
+malloc(uint nbytes)
+{
+  #...
+  hp->s.size = nu;
+    1272:	01652423          	sw	s6,8(a0)
+```
+
+2. 在***trap.c***的```usertrap```函数中新增错误判断, ```scause == 15``` 时，尝试实现lazy page alloc 的逻辑：
+```c
+void
+usertrap(void)
+{
+  //...
+
+    syscall();
+  } else if((which_dev = devintr()) != 0){
+    // ok
+  } 
+  else if (r_scause() == 15) {
+    uint64 va = r_stval();
+    printf("page fault %p\n", va);
+    uint64 ka = (uint64) kalloc();
+    if (ka == 0) {  // Out of memory
+      p->killed = 1;
+    }
+    else {
+      memset((void *) ka, 0, PGSIZE);
+      va = PGROUNDDOWN(va); 
+      if (mappages(p->pagetable, va, PGSIZE, ka, PTE_W|PTE_U|PTE_R) !=0) {  // 将物理内存page指向用户地址空间中合适的虚拟内存地址va
+        kfree((void *)ka);
+        p->killed = 1;
+      }
+    }
+  }
+  else {
+    //...
+  }
+ //...
+}
+
+```
+进行测试：
+![](./image/MIT6.S081/pagefault2.png)
+还是没有正常工作，这里可以看到两个page fault。第一个对应的虚拟内存地址是```0x4008```，但是很明显在处理这个page fault时，我们又有了另一个page fault ```0x13f48```。
+由于之前lazy allocation没有分配实际的内存，因此uvmunmap报错，因为一些它尝试unmap的page在lazy allocation是没有实际分配
+
+3. 修改***kernel/vm.c***中的```uvmunmap```函数
+```c
+// vm.c
+void
+uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+{
+  uint64 a;
+  pte_t *pte;
+
+  if((va % PGSIZE) != 0)
+    panic("uvmunmap: not aligned");
+
+  for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0)
+      panic("uvmunmap: walk");
+    if((*pte & PTE_V) == 0)
+      // panic("uvmunmap: not mapped");
+      continue;
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("uvmunmap: not a leaf");
+    if(do_free){
+      uint64 pa = PTE2PA(*pte);
+      kfree((void*)pa);
+    }
+    *pte = 0;
+  }
+}
+```
+重新编译并运行:
+![](./image/MIT6.S081/pagefault3.png)
+可以看到```echo hi```正常工作了
+
+## 8.3 Zero Fill On Demand
+* 用户程序的地址空间中，存在一个**BSS区域**，其中包含了未被初始化或者初始化为0的全局或者静态变量。为了节省内存，我们可以将其中的虚拟地址全部映射到物理内存的**一个**page上。
+![](./image/MIT6.S081/ZFOD.png)
+* 显然BSS中的PTE都应该是只读的，在之后应用程序尝试写BSS中的一个page时（比如更改一些变量的值），会产生page fault，这时我们应该创建一个新的page,将其内容设置为0，并重新执行指令。
+* 本质上与lazy allocation类似，都是将一部分操作推迟到了page fault再去执行。
+
+## 8.4 Copy On Wirte(COW) Fork (写时复制分支)
+* 之前提到过，```fork```创建了shell地址空间或其他程序地址空间的一个完整的拷贝，而```exec```做的第一件事情就是丢弃这个空间，用要执行的函数的地址空间取代替它，这样看着很浪费
+* COW fork的优化方式：当我们创建子进程时，**直接共享父进程的物理内存page**，即设置子进程的PTE指向父进程对应的物理内存page。
+* 一旦子进程想要修改这些内存的内容，**相应的更新应该对父进程不可见**，因为我们希望在父进程和子进程之间有强隔离性。我们可以将父进程和子进程的PTE都设置为只读的。
+* 在之后我们需要更改内存的内容时，我们会得到page fault。因为父进程和子进程都会继续运行，而父进程或者子进程都可能会执行store指令来更新一些全局变量，这时就会触发page fault，因为现在在向一个只读的PTE写数据。
+* 假设现在是子进程在执行store指令，我们将触发page fault的页面复制一份到新页面。这时，新的页面只对子进程可见，并且可读可写，旧的那个页面只对父进程可见并且可读可写。
+***
+Q： 当发生page fault时，我们其实是在向一个只读的地址执行写操作。内核如何能分辨现在是一个copy-on-write fork的场景，而不是应用程序在向一个正常的只读地址写数据。是不是说默认情况下，用户程序的PTE都是可读写的，除非在copy-on-write fork的场景下才可能出现只读的PTE？
+
+A: 内核必须要能够识别这是一个copy-on-write场景。几乎所有的page table硬件都支持了这一点。我们之前并没有提到相关的内容，下图是一个常见的多级page table。对于PTE的标志位，我之前介绍过第0bit到第7bit，但是没有介绍最后两位RSW。这两位保留给supervisor software使用，supervisor softeware指的就是内核。内核可以随意使用这两个bit位。所以可以做的一件事情就是，将bit8标识为当前是一个copy-on-write page。
+![](./image/MIT6.S081/PTE_flags.png)
+当内核在管理这些page table时，对于copy-on-write相关的page，内核可以设置相应的bit位，这样当发生page fault时，我们可以发现如果copy-on-write bit位设置了，我们就可以执行相应的操作了。否则的话，比如说lazy allocation，我们就做一些其他的处理操作。
+在copy-on-write lab中，你们会使用RSW在PTE中设置一个copy-on-write标志位。
+
+Q: 当父进程退出时，我们不能立即释放page，因为有可能子进程还在使用这些内存，那么现在释放内存page的依据是什么呢？
+
+A: 我们需要对于每一个物理内存page的引用进行计数，当我们释放虚拟page时，我们将物理内存page的引用数减1，如果引用数等于0，那么我们就能释放物理内存page。所以在copy-on-write lab中，你们需要引入一些额外的数据结构或者元数据信息来完成引用计数。
+***
+
+## 8.5 Demand Paging
+* 同样在exec中，之前提到的text, data区域，我们也可以采用延迟的方式，等到应用程序实际需要这些指令的时候再加载内存。在这之前，我们将这些暂时不分配实际内存的PTE的valid bit 位设置为0。
+* 应用程序从地址0开始运行，触发第一个page fault。**我们需要在某个地方记录了这些page对应的程序文件**，在page fault handler中需要从程序文件中读取page数据，加载到内存中；之后将内存page映射到page table；最后再重新执行指令。
+* 对于demand paging来说，假设**内存已经耗尽**了，这个时候如果得到了一个page fault，需要从文件系统拷贝中拷贝一些内容到内存中，那么可以选择**撤回page(evict apge)**：比如说将部分内存page中的内容写回到文件系统再撤回page。一旦你撤回并释放了page，那么你就有了一个新的空闲的page，你可以使用这个刚刚空闲出来的page，分配给刚刚的page fault handler，再重新执行指令。
+* 在撤回page时，应当使用**Least Recently Used（LRU）策略**，并且加上一些优化，比如优先撤回non-dirty page，这样可以减少写的操作。
+* 如果想实现LRU，你需要找到一个在一定时间内没有被访问过的page，那么这个page可以被用来撤回。而被访问过的page不能被撤回。所以**Access bit**通常被用来实现这里的LRU策略。
+
+## 8.6 Memory Mapped Files
+* Memory mapped files 的核心思想是将完整或部分文件加载到内存中，这样就可以**通过内存地址**相关的load 指令或者store指令**来操纵文件**。
+* 为了实现该功能，现代的操作系统会提供一个```mmap```系统调用
+    ```c
+    /**
+     *@brief 从fd对应的文件的偏移量offset开始，映射长度为len的内容到地址va
+    *@param va：虚拟内存地址
+    *@param protection:只读或只写
+    *@param falgs:一些标志位，表示该区域是私有的还是共享的
+    *@param fd:文件描述符
+    */
+    mmap(va, len, protection, flags, fd, offset)
+    ```
+* 假设文件内容是读写并且内核实现```mmap```的方式是**eager**方式（不过大部分系统都不会这么做），内核会从文件的offset位置开始，将数据拷贝到内存，设置好PTE指向物理内存的位置。之后应用程序就可以使用load或者store指令来修改内存中对应的文件内容。当完成操作之后，会有一个对应的```unmap```系统调用，参数是虚拟地址（VA），长度（len）。来表明应用程序已经完成了对文件的操作，在unmap时间点，我们需要将dirty block写回到文件中。我们可以很容易的找到哪些block是dirty的，因为它们在PTE中的dirty bit为1。
+* 在聪明的内存管理机制中，这些以```lazy```的方式实现。我们不会立即将文件内容拷贝到内存中，而是先记录一下这个PTE属于这个文件描述符。相应的信息通常在**VMA结构体**中保存，VMA全称是Virtual Memory Area。例如对于这里的文件f，会有一个VMA，在VMA中我们会记录文件描述符，偏移量等等，这些信息用来表示对应的内存虚拟地址的实际内容在哪，这样当我们得到一个位于VMA地址范围的page fault时，内核可以从磁盘中读数据，并加载到内存中。所以这里回答之前一个问题，**dirty bit**是很重要的，因为在unmap中，你需要向文件回写dirty block。
+***
+Q: 有没有可能多个进程将同一个文件映射到内存，然后会有同步的问题？
+
+A： 好问题。这个问题其实等价于，多个进程同时通过read/write系统调用读写一个文件会怎么样？
+这里的行为是不可预知的。write系统调用会以某种顺序出现，如果两个进程向一个文件的block写数据，要么第一个进程的write能生效，要么第二个进程的write能生效，只能是两者之一生效。在这里其实也是一样的，所以我们并不需要考虑冲突的问题。
+一个更加成熟的Unix操作系统支持锁定文件，你可以先锁定文件，这样就能保证数据同步。但是默认情况下，并没有同步保证。
+***
+
+
+# Lab5 Xv6 lazy page allocation
+**前置知识：**
+* 书第四章，特别是4.6
+* ***kernel/trap.c***
+* ***kernel/vm.c***
+* ***kernel/sysproc.c***
+
+## Task1 Eliminate allocation from sbrk() 
+<span style="background-color:green;">你的首项任务是删除```sbrk(n)```系统调用中的页面分配代码（位于***sysproc.c***中的函数```sys_sbrk()```）。```sbrk(n)```系统调用将进程的内存大小增加n个字节，然后返回新分配区域的开始部分（即旧的大小）。新的```sbrk(n)```应该只将进程的大小（```myproc()->sz```）增加n，然后返回旧的大小。它不应该分配内存——因此您应该删除对```growproc()的```调用（但是您仍然需要增加进程的大小！）。</span>
+
+这个任务在课上做过，见[Lec08](#lab5task1&2)
+
+## Task2 allocation
+<span style="background-color:green;">修改***trap.c***中的代码以响应来自用户空间的页面错误，方法是新分配一个物理页面并映射到发生错误的地址，然后返回到用户空间，让进程继续执行。您应该在生成“```usertrap(): …```”消息的```printf```调用之前添加代码。你可以修改任何其他xv6内核代码，以使```echo hi```正常工作。</span>
+
+**提示：**
+* 你可以在```usertrap()```中查看```r_scause()```的返回值是否为13或15来判断该错误是否为页面错误
+* ```stval```寄存器中保存了造成页面错误的虚拟地址，你可以通过```r_stval()```读取
+* 参考***vm.c***中的```uvmalloc()```中的代码，那是一个```sbrk()```通过```growproc()```调用的函数。你将需要对```kalloc()```和```mappages()```进行调用
+* 使用```PGROUNDDOWN(va)```将出错的虚拟地址向下舍入到页面边界
+* 当前```uvmunmap()```会导致系统```panic```崩溃；请修改程序保证正常运行
+* 如果内核崩溃，请在k***ernel/kernel.asm***中查看```sepc```
+* 使用pgtbl lab的```vmprint```函数打印页表的内容
+* 如果您看到错误“incomplete type proc”，请include“***spinlock.h***”然后是“***proc.h***”。
+
+如果一切正常，你的lazy allocation应该使```echo hi```正常运行。您应该至少有一个页面错误（因为延迟分配），也许有两个。
+
+这个任务在课堂上也完成了大部分，具体需要修正一些地方:
+1. 将```usertrap```中的page fault 判断条件完善
+1. PTE检查条件加一个```PTE_X```
+    ```c
+    void
+    trapinithart(void)
+    {
+      w_stvec((uint64)kernelvec);
+    }
+
+    //
+    // handle an interrupt, exception, or system call from user space.
+    // called from trampoline.S
+    //
+    void
+    usertrap(void)
+    {
+      //...
+        syscall();
+      } else if((which_dev = devintr()) != 0){
+        // ok
+      } 
+      else if (r_scause() == 15 || r_scause() == 13) {  // page fault
+        uint64 va = r_stval();  // where the page fault is 
+        printf("page fault %p\n", va);
+        uint64 ka = (uint64) kalloc();
+        if (ka == 0) {  // OOM
+          p->killed = 1;
+        }
+        else {
+          memset((void *) ka, 0, PGSIZE);
+          va = PGROUNDDOWN(va);
+          if (mappages(p->pagetable, va, PGSIZE, ka, PTE_W|PTE_U|PTE_R|PTE_X) !=0) {
+            kfree((void *)ka);
+            p->killed = 1;
+          }
+        }
+      }
+      else {
+        //...
+      }
+    //...
+    }
+    ```
+1. 最后将[pgtbl lab中的vmprint](#task1-print-a-page-table)添加进代码，测试通过
+
+## Task3 Lazytests and Usertests
+我们为您提供了```lazytests```，这是一个xv6用户程序，它测试一些可能会给您的惰性内存分配器带来压力的特定情况。修改内核代码，使所有```lazytests```和```usertests```都通过。
+1. 处理```sbrk()```参数为负的情况。
+1. 如果某个进程在高于```sbrk()```分配的任何虚拟内存地址上出现页错误，则终止该进程。
+1. 在```fork()```中正确处理父到子内存拷贝。
+1. 处理这种情形：进程从```sbrk()```向系统调用（如```read```或```write```）传递有效地址，但尚未分配该地址的内存。
+1. 正确处理内存不足：如果在页面错误处理程序中执行```kalloc()```失败，则终止当前进程。
+1. 处理用户栈下面的无效页面上发生的错误。
+
+**步骤：**
+1. 当```sbrk()```参数为负数时，意为缩减内存，需调用```uvmdealloc()```函数，需要限制缩小后的内存空间不能小于0
+    ```c
+    // kernel/sys_proc.c
+    uint64
+    sys_sbrk(void)
+    {
+      int addr;
+      int n;
+
+      if(argint(0, &n) < 0)
+        return -1;
+
+      struct proc* p = myproc();
+      addr = p->sz;
+      uint64 sz = p->sz; 
+
+      if(n>0) {  // lazy alloc
+        p->sz += n;
+      }
+      else if(sz + n > 0) {
+        sz = uvmdealloc(p->pagetable, sz, sz+n);
+        p->sz = sz;
+      }
+      else {
+        return -1;
+      }
+
+      return addr;
+    }
+    ```
+
+1. 修改```uvmcopy()```，使得fork能够正确处理父到子的内存拷贝
+    ```c
+    // kernel/vm.c
+    int
+    uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+    {
+      ...
+      for(i = 0; i < sz; i += PGSIZE){
+        if((pte = walk(old, i, 0)) == 0)
+          continue;
+        if((*pte & PTE_V) == 0)
+          continue;
+        //...
+      }
+      //...
+    }
+    ```
+
+1. 修改```uvmunmap```， 使得运行不报错
+    ```c
+    // vm.c
+    void
+    uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+    {
+      ...
+
+      for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
+        if((pte = walk(pagetable, a, 0)) == 0)
+          continue;
+        if((*pte & PTE_V) == 0)
+          continue;
+
+        ...
+      }
+    }
+    ```
+
+1. 处理进程从```sbrk()```向系统调用（如```read```或```write```）传递有效地址，但尚未分配该地址的内存的情况。
+在***kernel/syscall.c***:```argaddr()```中添加分配物理内存的实现，因为将地址传入系统调用后，会在这里从寄存器中读取。
+    ```c
+    // kernel/syscall.c
+    // Retrieve an argument as a pointer.
+    // Doesn't check for legality, since
+    // copyin/copyout will do that.
+    int
+    argaddr(int n, uint64 *ip)
+    {
+      *ip = argraw(n);
+      struct proc* p = myproc();
+
+      // page fault of lazy allocation
+      if(walkaddr(p->pagetable, *ip) == 0) {  // addr not mapped. TODO: reduce the call of walkaddr() here
+        if(PGROUNDUP(p->trapframe->sp) - 1 < *ip && *ip < p->sz) {  // p->sz was updated already
+          char* pa = kalloc();
+          if(pa == 0)   // OOM
+            return -1;
+          memset(pa, 0, PGSIZE);
+
+          if(mappages(p->pagetable, PGROUNDDOWN(*ip), PGSIZE, (uint64)pa, 
+          PTE_R | PTE_W | PTE_X | PTE_U) != 0) {
+            kfree(pa);
+            return -1;
+          }
+        }
+        else {  // not on the pages allocated in lazy alloc
+          return -1;
+        }
+      }
+
+      return 0;
+    }
+    ```
+
+**测试结果**：
+第二个测试报错
+```sh
+panic: freewalk: leaf
+```
+在***vm.c***:```freewalk()```中修改一下：
+```c
+void
+freewalk(pagetable_t pagetable)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    //...
+    } else if(pte & PTE_V){
+      //panic("freewalk: leaf");
+    }
+  }
+  //...
+}
+```
+再次测试报错uvmunmapped,在usertrap中添加判断条件，当```va > p->sz```时杀掉进程:
+
+    ```c
+    void
+    usertrap(void)
+    {
+      //...
+      else if (r_scause() == 15 || r_scause() == 13) {  // page fault
+        uint64 va = r_stval();  // where the page fault is 
+        do {
+          if(va > p->sz) {
+            p->killed = 1;
+            break;
+          }
+          uint64 ka = (uint64) kalloc();
+          if (ka == 0) {  // OOM
+            p->killed = 1;
+          }
+          else {
+            memset((void *) ka, 0, PGSIZE);
+            va = PGROUNDDOWN(va);
+            if (mappages(p->pagetable, va, PGSIZE, ka, PTE_W|PTE_U|PTE_R|PTE_X) !=0) {
+              kfree((void *)ka);
+              p->killed = 1;
+            }
+          }
+            } while(0);
+      }
+      else {
+        //...
+      }
+    //...
+    }
+    ```
+再次进行```lazytests```测试：
+![](./image/MIT6.S081/lazytests.png)\
+**usertests**有一项没有通过：
+```sh
+test stacktest: (null): stacktest: read below stack 0x0000000000000001
+FAILED
+```
+刚才忽略了保护页，在新增的判断条件下面再加一个判断：
+
+```c
+void
+usertrap(void)
+{
+  //...
+  else if (r_scause() == 15 || r_scause() == 13) {  // page fault
+    uint64 va = r_stval();  // where the page fault is 
+    do {
+      if(va > p->sz) {
+        p->killed = 1;
+        break;
+      }
+      if(va > p->sz - 2*PGSIZE && va < p->sz - PGSIZE) {  // guard page
+        p->killed = 1;
+        break;
+      }
+      //...
+```
+
+再次运行```usertests```:
+![](./image/MIT6.S081/lazylabpass.png)
+
