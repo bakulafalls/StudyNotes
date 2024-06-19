@@ -3502,6 +3502,7 @@ csrw sscratch, t0
 csrrw a0, sscratch, a0
 ```
 交换```SSCRATCH```寄存器和```a0```寄存器的值。交换完成之后，a0持有的是系统调用的返回值，SSCRATCH持有的是trapframe的地址。
+<a id="sret"></a>
 执行完kernel中的最后一条指令```sret```：
 1.  程序会切换回user mode
 
@@ -4456,3 +4457,1005 @@ usertrap(void)
 再次运行```usertests```:
 ![](./image/MIT6.S081/lazylabpass.png)
 
+
+# Lec09 Interrupts 
+**预习内容：**
+* 书第五章
+* ***kernel/kernelvec.S***
+* ***kernel/plic.c***
+* ***kernnel/console.c***
+* ***kernel/uart.c***
+* ***kernel/printf.c***
+
+**本课讨论的主要内容：**
+* console中的提示符“```$ ```”是如何显示出来的
+* 如果你在键盘输入“```ls```”，这些字符是怎么最终在console中显示出来的。
+
+## 9.1 真实操作系统内存使用情况 
+* 在真实的操作系统中，大部分内存都被使用了，但是大部分内存并没有被应用程序所使用，而是被buff/cache用掉了。
+* 当内核在分配内存时，通常都不是一个低成本的操作，因为并不是总有足够的可用内存，**为了分配内存需要先撤回一些内存**。
+* **实际使用的内存数量远小于地址空间的大小**，所以上节课讨论的基于虚拟内存和page fault提供的很多功能都是很有用的。
+
+## 9.2 Interrupt硬件部分
+*  **中断(Interrupts)** 对应的场景就是硬件想要得到操作系统的关注。
+* **系统调用**、**page fault**、**中断**都采用相同的机制：操作系统保存当前工作，处理中断，处理完成后再恢复之前的工作。
+* 中断与系统调用主要有3个小区别：
+    1. **异步(asynchronous)**。当硬件生成中断时，Interrupt handler与当前运行的进程在CPU上没有任何关联。但如果是系统调用的话，系统调用发生在运行进程的context下。
+    1. **并发(concurrency)**。对于中断来说，CPU和生成中断的设备是并行地在运行。网卡自己独立的处理来自网络的packet，然后在某个时间点产生中断，但是同时，CPU也在运行。所以我们在CPU和设备之间是真正的并行的，我们必须管理这里的并行。下一节课会介绍更多并发相关的内容。
+    1. **程序设备(program device)**。我们这节课主要关注外部设备，例如网卡，UART，而这些设备需要被编程。每个设备都有一个编程手册，就像RISC-V有一个包含了指令和寄存器的手册一样。设备的编程手册包含了它有什么样的寄存器，它能执行什么样的操作，在读写控制寄存器的时候，设备会如何响应。不过通常来说，设备的手册不如RISC-V的手册清晰，这会使得对于设备的编程会更加复杂。
+* 外设中断来自于主板上的设备
+    ![board](./image/MIT6.S081/riscv_board.png)
+    主板上的各种线路将外设和CPU连接在一起。
+*  类似于读写内存，我们可以通过向对应的设备的地址执行**load/store指令**，来对例如UART0的设备进行编程。这里load/store会**读写设备的控制寄存器**。
+* 处理器上是通过Platform Level Interrupt Control，简称**PLIC**来处理设备中断。PLIC会管理来自于外设的中断。
+* PLIC会将中断**路由**到某一个CPU的核。如果所有的CPU核都正在处理中断，PLIC会保留中断直到有一个CPU核可以用来处理中断。所以**PLIC需要保存一些内部数据来跟踪中断的状态**。这里的具体流程是：
+    1. PLIC会通知当前有一个待处理的中断
+    1. 其中一个CPU核会Claim接收中断，这样PLIC就不会把中断发给其他的CPU处理
+    1. CPU核处理完中断之后，CPU会通知PLIC
+    1. PLIC将不再保存中断的信息
+***
+Q: PLIC有没有什么机制能确保中断一定被处理？
+
+A: 这里取决于内核以什么样的方式来对PLIC进行编程。PLIC只是分发中断，而内核需要对PLIC进行编程来告诉它中断应该分发到哪。实际上，内核可以对中断优先级进行编程，这里非常的灵活。
+
+Q: 当UART触发中断的时候，所有的CPU核都能收到中断吗？
+
+A: 取决于你如何对PLIC进行编程。对于XV6来说，所有的CPU都能收到中断，但是只有一个CPU会Claim相应的中断。
+***
+
+## 9.3 设备驱动概述
+* 管理设备的代码称为**驱动(driver)**， 所有的驱动都在内核中。
+* 查看UART设备的驱动，在***uart.c***中，大部分驱动都分为bottom/top两个部分。
+    ![](./image/MIT6.S081/interrupt_hd.png)
+    **bottom部分**通常是Interrupt handler。当CPU接收到中断且已设置为接收时，会调用相应的中断处理程序。中断处理程序不在特定进程上下文中运行(*因此进程的page table并不知道该从哪个地址读写数据，也就无法直接从Interrupt handler读写数据*)，只负责处理中断。
+    **top部分**是用户进程或内核其他部分调用的接口。对于UART，有read/write接口，供更高层代码调用。
+    通常情况下，驱动中会有一些**队列（或者说buffer）**，top部分的代码会从队列中读写数据，而Interrupt handler（bottom部分）同时也会向队列中读写数据。这里的队列可以将**并行运行的设备和CPU解耦**开来。
+
+* 对设备进行编程通常是通过**memory mapped I/O** 完成的。操作系统需要知道这些设备位于物理地址空间的具体位置，然后再通过普通的load/store指令对这些地址进行编程。
+
+## 9.4 在XV6中设置中断
+* 在键盘输入```ls```,在console看到```$ls```的过程：
+
+对于```$```来说：
+    1. 设备将字符传输给UART寄存器
+    2. UART在发送完字符后产生一个中断。在QEMU中，模拟的线路的另一端会有另一个UART芯片（模拟的），这个UART芯片连接到了虚拟的Console，它会进一步将“```$``` ”显示在console上。
+
+对于```ls```来说：
+    1. 键盘连接到了UART的输入线路，在键盘上按下一个按键，UART芯片会将按键字符通过串口线发送到另一端的UART芯片。
+    2. UART芯片先将数据bit合并成一个Byte，之后再产生一个中断，并告诉处理器说这里有一个来自于键盘的字符。
+    3. Interrupt handler会处理来自于UART的字符。
+
+* RISC-V有许多与中断相关的寄存器：
+
+1. ```SIE（Supervisor Interrupt Enable）```寄存器。这个寄存器中有一个bit（```E```）专门针对例如UART的外部设备的中断；有一个bit（```S```）专门针对软件中断，软件中断可能由一个CPU核触发给另一个CPU核；还有一个bit（```T```）专门针对定时器中断。我们这节课只关注外部设备的中断。
+
+1. ```SSTATUS（Supervisor Status）```寄存器。这个寄存器中有一个bit来打开或者关闭中断。每一个CPU核都有独立的```SIE```和```SSTATUS```寄存器，除了通过SIE寄存器来单独控制特定的中断，还可以通过```SSTATUS```寄存器中的一个bit来控制所有的中断。
+
+1. ```SIP（Supervisor Interrupt Pending）```寄存器。当发生中断时，处理器可以通过查看这个寄存器知道当前是什么类型的中断。
+
+1. ```SCAUSE```寄存器，这个寄存器我们之前看过很多次。它会表明当前状态的原因是中断。
+
+1. ```STVEC```寄存器，它会保存当trap，page fault或者中断发生时，CPU运行的用户程序的程序计数器，这样才能在稍后恢复程序的运行。
+
+
+**xv6如何对其他寄存器进行编程，使得CPU能够接受中断：**
+* <details>
+    <summary><span style="color:lightblue;">查看start函数解析</span> </summary>
+
+  ```c
+  // part of start.c
+  // entry.S jumps here in machine mode on stack0.
+  void
+  start()
+  {
+    // set M Previous Privilege mode to Supervisor, for mret.
+    unsigned long x = r_mstatus(); 
+    x &= ~MSTATUS_MPP_MASK;
+    x |= MSTATUS_MPP_S;   // 设置为supervisor mode
+    w_mstatus(x);
+
+    // set M Exception Program Counter to main, for mret.
+    // requires gcc -mcmodel=medany
+    w_mepc((uint64)main);
+
+    // disable paging for now.
+    w_satp(0);
+
+    // delegate all interrupts and exceptions to supervisor mode.
+    w_medeleg(0xffff);
+    w_mideleg(0xffff);
+    w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);  // 设置SIE寄存器来接收外部中断、软件中断和定时器中断
+
+    // ask for clock interrupts.
+    timerinit();
+
+    // keep each CPU's hartid in its tp register, for cpuid().
+    int id = r_mhartid();
+    w_tp(id);
+
+    // switch to supervisor mode and jump to main().
+    asm volatile("mret");
+  }
+  ```
+  </details>
+
+* <details>
+    <summary><span style="color:lightblue;">查看main函数解析</span> </summary>
+
+    ```c
+    // main.c
+    // start() jumps here in supervisor mode on all CPUs.
+    void
+    main()
+    {
+      if(cpuid() == 0){
+        consoleinit();  // 这个函数初始化了一个锁，然后调用uartinit(),也就是配置好uart芯片使其可用
+        printfinit();
+        printf("\n");
+        printf("xv6 kernel is booting\n");
+        printf("\n");
+        kinit();         // physical page allocator
+        kvminit();       // create kernel page table
+        kvminithart();   // turn on paging
+        procinit();      // process table
+        trapinit();      // trap vectors
+        trapinithart();  // install kernel trap vector
+        plicinit();      // set up interrupt controller  // 初始化PLIC
+        plicinithart();  // ask PLIC for device interrupts
+        binit();         // buffer cache
+        iinit();         // inode cache
+        fileinit();      // file table
+        virtio_disk_init(); // emulated hard disk
+        userinit();      // first user process
+        __sync_synchronize();
+        started = 1;
+      } else {
+        while(started == 0)
+          ;
+        __sync_synchronize();
+        printf("hart %d starting\n", cpuid());
+        kvminithart();    // turn on paging
+        trapinithart();   // install kernel trap vector
+        plicinithart();   // ask PLIC for device interrupts
+      }
+
+      scheduler();        
+    } 
+    ```
+  </details>
+
+* <details>
+    <summary><span style="color:lightblue;">查看uartinit函数</span> </summary>
+
+  ```c
+  // uart.c
+  void
+  uartinit(void)
+  {
+    // disable interrupts.
+    WriteReg(IER, 0x00);
+
+    // special mode to set baud rate.
+    WriteReg(LCR, LCR_BAUD_LATCH);
+
+    // LSB for baud rate of 38.4K.
+    WriteReg(0, 0x03);
+
+    // MSB for baud rate of 38.4K.
+    WriteReg(1, 0x00);
+
+    // leave set-baud mode,
+    // and set word length to 8 bits, no parity.  
+    WriteReg(LCR, LCR_EIGHT_BITS);
+
+    // reset and enable FIFOs.
+    WriteReg(FCR, FCR_FIFO_ENABLE | FCR_FIFO_CLEAR);
+
+    // enable transmit and receive interrupts.
+    WriteReg(IER, IER_TX_ENABLE | IER_RX_ENABLE);
+
+    initlock(&uart_tx_lock, "uart");
+  }
+  ```
+  </details>
+
+  运行完```uartinit```函数，原则上UART就可以生成中断了。但是因为我们还没有对PLIC编程，所以中断不能被CPU感知。最终，在```main```函数中，需要调用```plicinit```函数和```plicinithart```函数。
+
+* <details>
+    <summary><span style="color:lightblue;">查看plicinit函数</span> </summary>
+
+  ```c
+  // plic.c
+  void
+  plicinit(void)
+  {
+    // set desired IRQ priorities non-zero (otherwise disabled).
+    *(uint32*)(PLIC + UART0_IRQ*4) = 1;  // 使能UART的中断
+    *(uint32*)(PLIC + VIRTIO0_IRQ*4) = 1;  // 设置PLIC接收来自IO磁盘的中断  
+  }
+  ```
+  </details>
+
+  ```plicinit```是由0号CPU运行，之后，每个CPU的核都需要调用```plicinithart```函数表明对于哪些外设中断感兴趣。
+
+* <details>
+    <summary><span style="color:lightblue;">查看plicinithart函数</span> </summary>
+
+  ```c
+  // plic.c
+  void
+  plicinithart(void)
+  {
+    int hart = cpuid();
+    
+    // set uart's enable bit for this hart's S-mode. 
+    *(uint32*)PLIC_SENABLE(hart)= (1 << UART0_IRQ) | (1 << VIRTIO0_IRQ);  // 每个CPU的核都表明自己对来自于UART和VIRTIO的中断感兴趣
+
+    // set this hart's S-mode priority threshold to 0.
+    *(uint32*)PLIC_SPRIORITY(hart) = 0;  // 因为我们忽略中断的优先级，所以我们将优先级设置为0
+  }
+  ```
+  </details>
+
+  到目前为止，我们有了生成中断的外部设备，我们有了PLIC可以传递中断到单个的CPU。但是CPU自己还没有设置好接收中断，因为我们还没有设置好```SSTATUS```寄存器。在```main```函数的最后，程序调用了```scheduler```函数，
+
+* <details>
+    <summary><span style="color:lightblue;">查看scheduler函数</span> </summary>
+  
+  ```c
+  // kernel/proc.c
+  // Per-CPU process scheduler.
+  // Each CPU calls scheduler() after setting itself up.
+  // Scheduler never returns.  It loops, doing:
+  //  - choose a process to run.
+  //  - swtch to start running that process.
+  //  - eventually that process transfers control
+  //    via swtch back to the scheduler.
+  void
+  scheduler(void)
+  {
+    struct proc *p;
+    struct cpu *c = mycpu();
+    
+    c->proc = 0;
+    for(;;){
+      // Avoid deadlock by ensuring that devices can interrupt.
+      intr_on();
+      
+      int nproc = 0;
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state != UNUSED) {
+          nproc++;
+        }
+        if(p->state == RUNNABLE) {
+          // Switch to chosen process.  It is the process's job
+          // to release its lock and then reacquire it
+          // before jumping back to us.
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+        }
+        release(&p->lock);
+      }
+      if(nproc <= 2) {   // only init and sh exist
+        intr_on();
+        asm volatile("wfi");
+      }
+    }
+  }
+  ```
+  </details>
+
+  ```scheduler```函数主要是运行进程，它在一开始调用```intr_on```函数来使得CPU能接收中断
+  ```c
+  // part of riscv.h
+  // enable device interrupts
+  static inline void
+  intr_on()
+  {
+    w_sstatus(r_sstatus() | SSTATUS_SIE);  // 设置SSTATUS寄存器，打开中断标志位
+  }
+  ```
+
+  在这个时间点，中断被完全打开了。如果PLIC正好有待处理的的中断，那么这个CPU核会收到中断。
+
+## 9.5 UART驱动的top部分
+**如何从Shell输出“$”到Console：**
+* 查看***init.c***中的```main```函数，这是**系统启动后运行的第一个进程**
+  <details>
+    <summary><span style="color:lightblue;">查看init.c:mian函数</span> </summary>
+  
+  ```c
+  int
+  main(void)
+  {
+    int pid, wpid;
+
+    if(open("console", O_RDWR) < 0){
+      mknod("console", CONSOLE, 0);   // 创建一个代表Console的设备，因为是第一个打开的文件所以文件描述符为0
+      open("console", O_RDWR);
+    }
+    dup(0);  // stdout
+    dup(0);  // stderr   这里实际上通过复制文件描述符0，得到了另外两个文件描述符1,2。现在它们都指向Console
+
+    for(;;){
+      printf("init: starting sh\n");
+      pid = fork();
+      if(pid < 0){
+        printf("init: fork failed\n");
+        exit(1);
+      }
+      if(pid == 0){
+        exec("sh", argv);
+        printf("init: exec sh failed\n");
+        exit(1);
+      }
+
+      for(;;){
+        // this call to wait() returns if the shell exits,
+        // or if a parentless process exits.
+        wpid = wait((int *) 0);
+        if(wpid == pid){
+          // the shell exited; restart it.
+          break;
+        } else if(wpid < 0){
+          printf("init: wait returned an error\n");
+          exit(1);
+        } else {
+          // it was a parentless process; do nothing.
+        }
+      }
+    }
+  }
+  ```
+
+  </details>  
+
+*  Shell程序首先打开文件描述符0，1，2。之后Shell向文件描述符2打印提示符“```$``` ”。
+  ```c
+  // sh.c
+  int
+  getcmd(char *buf, int nbuf)
+  {
+    fprintf(2, "$ ");
+    memset(buf, 0, nbuf);
+    gets(buf, nbuf);
+    if(buf[0] == 0) // EOF
+      return -1;
+    return 0;
+  }
+  ```
+
+对于shell程序来说，**Console就像是一个普通的文件**(尽管它背后是UART设备)， Shell程序只是在向文件描述符2写数据。*在Unix系统中，设备是由文件表示的。*
+  
+* 现在查看```fprintf```如何工作, 在***user/print.c***中，主要用于写的函数```putc```:
+    ```c
+    // user/printf.c
+    static void
+    putc(int fd, char c)
+    {
+      write(fd, &c, 1);
+    }
+    ```
+    可以看到它只是调用了```write```系统调用, 由Shell输出的每一个字符都会触发一个```write```系统调用.
+
+* ```write```系统调用的最终实现在```sys_write()```函数中：
+    ```c
+    // sysfile.c
+    uint64
+    sys_write(void)
+    {
+      struct file *f;
+      int n;
+      uint64 p;
+
+      if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
+        return -1;
+
+      return filewrite(f, p, n);
+    }
+    ```
+  可以看到这个函数在对参数做完检查后调用了```filewrite```函数, 查看***file.c***：
+  <a id="filewrite"> </a>
+    ```c
+    // Write to file f.
+    // addr is a user virtual address.
+    int
+    filewrite(struct file *f, uint64 addr, int n)
+    {
+      int r, ret = 0;
+
+      if(f->writable == 0)
+        return -1;
+
+      if(f->type == FD_PIPE){  // 判断文件描述符类型
+        ret = pipewrite(f->pipe, addr, n);
+      } else if(f->type == FD_DEVICE){  // 设备
+        if(f->major < 0 || f->major >= NDEV || !devsw[f->major].write)  
+          return -1;
+        ret = devsw[f->major].write(1, addr, n);   // 根据设备类型执行相应的write函数 
+      } else if(f->type == FD_INODE){
+        // write a few blocks at a time to avoid exceeding
+        // the maximum log transaction size, including
+        // i-node, indirect block, allocation blocks,
+    ```
+    因为我们现在的设备是Console，所以我们知道这里会调用***console.c***中的```consolewrite```函数。(原因见下图)
+    ![](./image/MIT6.S081/Howtoconsole_w.png)
+
+*  查看```consolewrite```函数
+    ```c
+    // console.c
+    // user write()s to the console go here.
+    //
+    int
+    consolewrite(int user_src, uint64 src, int n)
+    {
+      int i;
+
+      acquire(&cons.lock);
+      for(i = 0; i < n; i++){
+        char c;
+        if(either_copyin(&c, user_src, src+i, 1) == -1)  // 考入字符
+          break;
+        uartputc(c);  // 将字符写入给UART设备
+      }
+      release(&cons.lock);
+
+      return i;
+    }
+    ```
+    可以认为```consolewrite```函数是一个UART驱动的top部分。***uart.c***中的```uartputc```函数会实际的打印字符
+
+*  查看```uartputc```函数
+    ```c
+    // uart.c
+    // the transmit output buffer.
+    struct spinlock uart_tx_lock;
+    #define UART_TX_BUF_SIZE 32
+    char uart_tx_buf[UART_TX_BUF_SIZE];  // 用来发送数据的vuffer, 大小为32字节
+    int uart_tx_w; // write next to uart_tx_buf[uart_tx_w++]   为producer提供的写指针
+    int uart_tx_r; // read next from uart_tx_buf[uar_tx_r++]   为consumer提供的读指针， 它们共同构成一个环形的buffer
+    //...
+    // add a character to the output buffer and tell the
+    // UART to start sending if it isn't already.
+    // blocks if the output buffer is full.
+    // because it may block, it can't be called
+    // from interrupts; it's only suitable for use
+    // by write().
+    void
+    uartputc(int c)
+    {
+      acquire(&uart_tx_lock);
+
+      if(panicked){
+        for(;;)
+          ;
+      }
+
+      while(1){
+        if(((uart_tx_w + 1) % UART_TX_BUF_SIZE) == uart_tx_r){  // 判断环形buffer是否满了
+          // buffer is full.
+          // wait for uartstart() to open up space in the buffer.
+          sleep(&uart_tx_r, &uart_tx_lock);
+        } else {
+          uart_tx_buf[uart_tx_w] = c;  // 将字符送到buffer中
+          uart_tx_w = (uart_tx_w + 1) % UART_TX_BUF_SIZE;  // 更新写指针
+          uartstart();
+          release(&uart_tx_lock);
+          return;
+        }
+      }
+    }
+    ```
+```uart_tx_w```和```uart_tx_r```共同构建了一个环形队列。Shell在这个场景下为producer（进行写操作），所以需要调用```uartputc函数```。将字符送进buffer中并更新写指针后调用了```uartstart```函数。
+*   <details>
+    <summary><span style="color:lightblue;">查看uartstart函数</span> </summary>
+    
+    ```c
+    // uart.c
+    // if the UART is idle, and a character is waiting
+    // in the transmit buffer, send it.
+    // caller must hold uart_tx_lock.
+    // called from both the top- and bottom-half.
+    void
+    uartstart()
+    {
+      while(1){
+        if(uart_tx_w == uart_tx_r){
+          // transmit buffer is empty.
+          return;
+        }
+        
+        if((ReadReg(LSR) & LSR_TX_IDLE) == 0){
+          // the UART transmit holding register is full,
+          // so we cannot give it another byte.
+          // it will interrupt when it's ready for a new byte.
+          return;
+        }
+        
+        int c = uart_tx_buf[uart_tx_r];
+        uart_tx_r = (uart_tx_r + 1) % UART_TX_BUF_SIZE;
+        
+        // maybe uartputc() is waiting for space in the buffer.
+        wakeup(&uart_tx_r);
+        
+        WriteReg(THR, c);
+      }
+    }
+    ```
+    </details>
+    ```uartstart```函数首先检查当前设备是否空闲，如果空闲的话，会从buffer中读出数据，然后将数据写入到**THR（Transmission Holding Register）**发送寄存器。这里相当于告诉设备，我这里有一个字节需要你来发送。一旦数据送到了设备，系统调用会返回，用户应用程序Shell就可以继续执行。这里从内核返回到用户空间的机制与lec[06](#sret)的trap机制是一样的。
+
+## 9.6 UART驱动的bottom部分
+**这一节主要讲向Console输出字符时，如果发生中断会怎么样。**
+* 当键盘生成了一个中断并且发向了PLIC，PLIC会将中断路由给一个特定的CPU核，并且如果这个CPU核设置了SIE寄存器的```E``` bit（注，针对外部中断的bit位），那么会发生以下事情：
+  1. 首先，会**清除SIE寄存器相应的bit**，这样可以阻止CPU核被其他中断打扰，该CPU核可以专心处理当前中断。处理完成之后，可以再次恢复SIE寄存器相应的bit。
+  1. 之后，会**设置SEPC寄存器为当前的程序计数器**。我们假设Shell正在用户空间运行，突然来了一个中断，那么当前Shell的程序计数器会被保存。
+  1. 之后，要**保存当前的mode**。在我们的例子里面，因为当前运行的是Shell程序，所以会记录user mode。
+  1. **将mode设置为Supervisor mode**。
+  1. 最后**将程序计数器的值设置成STVEC的值**。XV6中，STVEC保存的要么是```uservec```要么是```kernelvec```函数的地址。
+
+* 查看***trap.c***中的```usertrap```函数, 看它是如何处理中断的
+```c
+// trap.c
+void
+usertrap(void)
+{
+  //...
+    syscall();
+  } else if((which_dev = devintr()) != 0){
+    // ok
+  } else {
+    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    setkilled(p);
+  }
+//...
+}
+```
+在***trap.c***的```devintr```函数中，首先会通过SCAUSE寄存器判断当前中断是否是来自于外设的中断。如果是的话，再调用```plic_claim```函数来获取中断。
+*   <details>
+    <summary><span style="color:lightblue;">查看devintr函数</span> </summary>
+    
+    ```c
+    // check if it's an external interrupt or software interrupt,
+    // and handle it.
+    // returns 2 if timer interrupt,
+    // 1 if other device,
+    // 0 if not recognized.
+    int
+    devintr()
+    {
+      uint64 scause = r_scause();
+
+      if((scause & 0x8000000000000000L) &&
+        (scause & 0xff) == 9){
+        // this is a supervisor external interrupt, via PLIC.
+
+        // irq indicates which device interrupted.
+        int irq = plic_claim();  // 获取中断
+
+        if(irq == UART0_IRQ){  // UART中断(10)
+          uartintr();
+        } else if(irq == VIRTIO0_IRQ){
+          virtio_disk_intr();
+        } else if(irq){
+          printf("unexpected interrupt irq=%d\n", irq);
+        }
+
+        // the PLIC allows each device to raise at most one
+        // interrupt at a time; tell the PLIC the device is
+        // now allowed to interrupt again.
+        if(irq)
+          plic_complete(irq);
+
+        return 1;
+      } else if(scause == 0x8000000000000001L){
+        // software interrupt from a machine-mode timer interrupt,
+        // forwarded by timervec in kernelvec.S.
+
+        if(cpuid() == 0){
+          clockintr();
+        }
+        
+        // acknowledge the software interrupt by clearing
+        // the SSIP bit in sip.
+        w_sip(r_sip() & ~2);
+
+        return 2;
+      } else {
+        return 0;
+      }
+    }
+    ```
+    </details>
+
+*   <details>
+    <summary><span style="color:lightblue;">查看plic_claim函数</span> </summary>
+    
+    ```c
+    // kernel/plic.c
+    // ask the PLIC what interrupt we should serve.
+    int
+    plic_claim(void)
+    {
+      int hart = cpuid();
+      int irq = *(uint32*)PLIC_SCLAIM(hart);  // 将中断号返回，(UART为10)
+      return irq;
+    }
+    ```
+    </details>
+    
+    这个函数中，当前CPU核会告知PLIC，自己要处理中断，并返回中断号。当中断号为10时，表示为UART中断，```devintr```会调用```uartintr```函数：
+
+*   <details>
+    <summary><span style="color:lightblue;">查看uartintr函数</span> </summary>
+    
+    ```c
+    // uart.c
+    // handle a uart interrupt, raised because input has
+    // arrived, or the uart is ready for more output, or
+    // both. called from devintr().
+    void
+    uartintr(void)
+    {
+      // read and process incoming characters.
+      while(1){
+        int c = uartgetc();
+        if(c == -1)
+          break;
+        consoleintr(c);
+      }
+
+      // send buffered characters.
+      acquire(&uart_tx_lock);
+      uartstart();
+      release(&uart_tx_lock);
+    }
+    ```
+    </details>
+
+    由于我们讨论的是向UART发送数据，没有向键盘输入任何数据，所以UART的接受寄存器为空，```uartgtc()```会返回-1，程序直接运行至```uartstart```, 这个函数会将shell存储在buffer中的任意字符送出。
+    实际上在提示符“```$```”之后，Shell还会输出一个空格字符，```write```系统调用可以在UART发送提示符“```$```”的同时，并发的将空格字符写入到buffer中。所以UART的发送中断触发时，可以发现在buffer中还有一个空格字符，之后会将这个空格字符送出。
+
+***
+Q: UART对于键盘来说很重要，来自于键盘的字符通过UART走到CPU再到我们写的代码。但是我不太理解UART对于Shell输出字符究竟有什么作用？因为在这个场景中，并没有键盘的参与。
+
+A: 显示设备与UART也是相连的。所以**UART连接了两个设备，一个是键盘，另一个是显示设备，也就是Console**。QEMU也是通过模拟的UART与Console进行交互，而Console的作用就是将字符在显示器上画出来。
+
+Q: uartinit只被调用了一次，所以才导致了所有的CPU核都共用一个buffer吗？
+
+A: 因为只有一个UART设备，一个buffer只针对一个UART设备，而这个buffer会被所有的CPU核共享，这样运行在多个CPU核上的多个程序可以同时向Console打印输出，而驱动中是通过锁来确保多个CPU核上的程序串行的向Console打印输出。
+
+Q: 我们之所以需要锁是因为有多个CPU核，但是却只有一个Console，对吧？
+
+A: 是的，如我们之前说的驱动的top和bottom部分可以并行的运行。所以一个CPU核可以执行uartputc函数，而另个一CPU核可以执行uartintr函数，我们需要确保它们是串行执行的，而锁确保了这一点。
+***
+
+## 9.7 Interrupt相关的并发
+**中断相关的并发包括以下几种：**
+* **设备**与**CPU**并行运行。 也称为producer-consumer并行。
+* **中断会停止当前运行的程序**。在两个**内核指令之间**，取决于中断是否打开，可能会被中断打断执行。对于一些代码来说，如果不能在执行期间被中断，这时内核需要临时关闭中断，来确保这段代码的原子性。
+* 驱动的**top**和**bottom**部分是并行运行的。一个驱动的top和bottom部分可以并行的在不同的CPU上运行。这里我们通过lock来管理并行。因为这里有共享的数据，我们想要buffer在一个时间只被一个CPU核所操作。 
+
+图解第一种，以上面的```uartputc```函数中的buffer为例：
+![](./image/MIT6.S081/prdc_cnsmr.png)
+
+***
+Q: 这里的buffer对于所有的CPU核都是共享的吗？
+
+A: 这里的buffer存在于内存中，并且只有一份，所以，所有的CPU核都并行的与这一份数据交互。所以我们才需要lock。
+
+Q: 对于uartputc中的sleep，它怎么知道应该让Shell去sleep？
+
+A: sleep会将当前在运行的进程存放于sleep数据中。它传入的参数是需要等待的信号，在这个例子中传入的是uart_tx_r的地址。在uartstart函数中，一旦buffer中有了空间，会调用与sleep对应的函数wakeup，传入的也是uart_tx_r的地址。任何等待在这个地址的进程都会被唤醒。有时候这种机制被称为conditional synchronization。
+***
+
+## 9.8 UART读取键盘输入
+* 与上面[```filewrite()```](#filewrite)类似,```read```系统调用的底层```fileread```在读取的文件类型为设备时，也会根据相应的设备调用其对应的read函数。 同样对于console，会调用***console.c***中的```consoleread```函数：
+    ```c
+    // input
+    #define INPUT_BUF 128
+      char buf[INPUT_BUF];
+      uint r;  // Read index
+      uint w;  // Write index
+      uint e;  // Edit index
+    } cons;
+    //...
+    // user read()s from the console go here.
+    // copy (up to) a whole input line to dst.
+    // user_dist indicates whether dst is a user
+    // or kernel address.
+    //
+    int
+    consoleread(int user_dst, uint64 dst, int n)
+    {
+      uint target;
+      int c;
+      char cbuf;
+
+      target = n;
+      acquire(&cons.lock);
+      while(n > 0){
+        // wait until interrupt handler has put some
+        // input into cons.buffer.
+        while(cons.r == cons.w){
+          if(myproc()->killed){
+            release(&cons.lock);
+            return -1;
+          }
+          sleep(&cons.r, &cons.lock);  // buffer为空时，进程sleep
+        }
+
+        c = cons.buf[cons.r++ % INPUT_BUF];
+
+        if(c == C('D')){  // end-of-file
+          if(n < target){
+            // Save ^D for next time, to make sure
+            // caller gets a 0-byte result.
+            cons.r--;
+          }
+          break;
+        }
+
+        // copy the input byte to the user-space buffer.
+        cbuf = c;
+        if(either_copyout(user_dst, dst, &cbuf, 1) == -1)
+          break;
+
+        dst++;
+        --n;
+
+        if(c == '\n'){
+          // a whole line has arrived, return to
+          // the user-level read().
+          break;
+        }
+      }
+      release(&cons.lock);
+
+      return target - n;
+    }  
+    ```
+
+    这里与UART类似，也有一个buffer，包含了128个字符。其他的基本一样，也有producer和consumser。但是在这个场景下**Shell变成了consumser**，因为Shell是从buffer中读取数据。而**键盘是producer**，它将数据写入到buffer中。
+
+* 在某个时间点，假设用户通过键盘输入了“l”，这会导致“l”被发送到主板上的UART芯片，产生中断之后再被PLIC路由到某个CPU核，之后会触发```devintr```函数，```devintr```可以发现这是一个UART中断，然后通过```uartgetc```函数获取到相应的字符，之后再将字符传递给c```consoleintr```函数。
+    ```c
+    // console.c:consoleintr
+    void
+    consoleintr(int c)
+    {
+    //...
+      default:
+        if(c != 0 && cons.e-cons.r < INPUT_BUF_SIZE){
+          c = (c == '\r') ? '\n' : c;
+
+          // echo back to the user.
+          consputc(c);
+
+          // store for consumption by consoleread().
+          cons.buf[cons.e++ % INPUT_BUF_SIZE] = c;
+
+          if(c == '\n' || c == C('D') || cons.e-cons.r == INPUT_BUF_SIZE){
+            // wake up consoleread() if a whole line (or end-of-file)
+            // has arrived.
+            cons.w = cons.e;
+            wakeup(&cons.r);
+          }
+        }
+        break;
+      }
+      
+      release(&cons.lock);
+    }
+    ```
+默认情况下，字符会通过```consputc```，输出到console上给用户查看。之后，字符被存放在buffer中。在遇到换行符的时候，唤醒之前sleep的进程，也就是Shell，再从buffer中将数据读出。
+
+所以这里也是通过buffer将consumer和producer之间解耦，这样它们才能按照自己的速度，独立的并行运行。如果某一个运行的过快了，那么buffer要么是满的要么是空的，consumer和producer其中一个会sleep并等待另一个追上来。
+
+## 9.9 Interrupt的演进
+* 现代的设备相比之前做了更多的工作。所以在产生中断之前，设备上会执行大量的操作，这样可以减轻CPU的处理负担。所以现在硬件变得更加复杂。
+* **轮询(Polling)**:  除了依赖Interrupt，CPU可以一直读取外设的控制寄存器，来检查是否有数据。对于UART来说，我们可以一直读取RHR寄存器，来检查是否有数据。现在，CPU不停的在轮询设备，直到设备有了数据。 但是这种方法会浪费CPU去不停地检查寄存器（而不是没有中断时sleep）。适用于**快设备**。
+* 对于一些精心设计的驱动，它们会在polling和Interrupt之间动态切换（注，也就是网卡的NAPI）。
+
+# Lab6 Copy-on-Write Fork for xv6
+**这个实验涉及到锁，因此建议学完Lec10再做。**
+虚拟内存提供了一定程度的间接寻址：内核可以通过将PTE标记为无效或只读来拦截内存引用，从而导致页面错误，还可以通过修改PTE来更改地址的含义。在计算机系统中有一种说法，任何系统问题都可以用某种程度的抽象方法来解决。Lazy allocation实验中提供了一个例子。这个实验探索了另一个例子：写时复制分支（copy-on write fork）。
+本实验分支：
+```sh
+$ git fetch
+$ git checkout cow
+$ make clean
+```
+
+**The problem**
+The ```fork()``` system call in xv6 copies all of the parent process's user-space memory into the child. If the parent is large, copying can take a long time. Worse, the work is often largely wasted; for example, a ```fork()``` followed by ```exec()``` in the child will cause the child to discard the copied memory, probably without ever using most of it. On the other hand, if both parent and child use a page, and one or both writes it, a copy is truly needed.
+
+**The solution**
+The goal of copy-on-write (COW) fork() is to defer allocating and copying physical memory pages for the child until the copies are actually needed, if ever.
+COW fork() creates just a pagetable for the child, with PTEs for user memory pointing to the parent's physical pages. COW fork() marks all the user PTEs in both parent and child as not writable. When either process tries to write one of these COW pages, the CPU will force a page fault. The kernel page-fault handler detects this case, allocates a page of physical memory for the faulting process, copies the original page into the new page, and modifies the relevant PTE in the faulting process to refer to the new page, this time with the PTE marked writeable. When the page fault handler returns, the user process will be able to write its copy of the page.
+
+COW fork() makes freeing of the physical pages that implement user memory a little trickier. A given physical page may be referred to by multiple processes' page tables, and should be freed only when the last reference disappears.
+
+## Task Implement copy-on write (hard)
+<span style="background-color:green;">您的任务是在xv6内核中实现copy-on-write fork。如果修改后的内核同时成功执行```cowtest```和```usertests```程序就完成了。</span>
+为了帮助测试你的实现方案，我们提供了一个名为```cowtest```的xv6程序（源代码位于***user/cowtest.c***）。```cowtest```运行各种测试，但在未修改的xv6上，即使是第一个测试也会失败。因此，最初您将看到：
+```sh
+$ cowtest
+simple: fork() failed
+$
+```
+“simple”测试分配超过一半的可用物理内存，然后执行一系列的```fork()```。```fork```失败的原因是没有足够的可用物理内存来为子进程提供父进程内存的完整副本。
+
+完成本实验后，内核应该通过```cowtest```和```usertests```中的所有测试。即：
+```sh
+$ cowtest
+simple: ok
+simple: ok
+three: zombie!
+ok
+three: zombie!
+ok
+three: zombie!
+ok
+file: ok
+ALL COW TESTS PASSED
+$ usertests
+...
+ALL TESTS PASSED
+$
+```
+**这是一个合理的攻克计划：**
+1. 修改```uvmcopy()```将父进程的物理页映射到子进程，而不是分配新页。在子进程和父进程的PTE中清除```PTE_W```标志。
+1. 修改```usertrap()```以识别页面错误。当COW页面出现页面错误时，使用```kalloc()```分配一个新页面，并将旧页面复制到新页面，然后将新页面添加到PTE中并设置```PTE_W```。
+1. 确保每个物理页在最后一个PTE对它的引用撤销时被释放——而不是在此之前。这样做的一个好方法是为每个物理页保留引用该页面的用户页表数的“引用计数”。当```kalloc()```分配页时，将页的引用计数设置为1。当```fork```导致子进程共享页面时，增加页的引用计数；每当任何进程从其页表中删除页面时，减少页的引用计数。```kfree()```只应在引用计数为零时将页面放回空闲列表。可以将这些计数保存在一个固定大小的整型数组中。你必须制定一个如何索引数组以及如何选择数组大小的方案。例如，您可以用页的物理地址除以4096对数组进行索引，并为数组提供等同于***kalloc.c***中```kinit()```在空闲列表中放置的所有页面的最高物理地址的元素数。
+1. 修改```copyout()```在遇到COW页面时使用与页面错误相同的方案。
+
+**提示：**
+1. lazy page allocation实验可能已经让您熟悉了许多与copy-on-write相关的xv6内核代码。但是，您不应该将这个实验室建立在您的lazy allocation解决方案的基础上；相反，请按照上面的说明从一个新的xv6开始。
+1. 有一种可能很有用的方法来记录每个PTE是否是COW映射。您可以使用RISC-V PTE中的RSW（reserved for software，即为软件保留的）位来实现此目的。
+1. ```usertests```检查```cowtest```不测试的场景，所以别忘两个测试都需要完全通过。
+1. ***kernel/riscv.h***的末尾有一些有用的宏和页表标志位的定义。
+1. 如果出现COW页面错误并且没有可用内存，则应终止进程。
+
+**步骤：**
+1. 在***kernel/riscv.h***中使用PTE中的RSW，新增一个flag来标记一个页面是否为COW fork页面
+    ```c
+    #define PTE_F (1L << 8) // 1 -> COW fork page, 8,9,10 was Reserved for supervisor software
+    ```
+1. 修改```uvmcopy()```，不为子进程分配新页，而是将父进程的PA映射到其中，同时禁用```PTE_W```，标记为```PTE_F```
+    ```c
+    // vm.c
+    int
+    uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+    {
+      pte_t *pte;
+      uint64 pa, i;
+      uint flags;
+      // char *mem;
+
+      for(i = 0; i < sz; i += PGSIZE){
+        if((pte = walk(old, i, 0)) == 0)
+          panic("uvmcopy: pte should exist");
+        if((*pte & PTE_V) == 0)
+          panic("uvmcopy: page not present");
+        pa = PTE2PA(*pte);
+        flags = PTE_FLAGS(*pte);
+
+        // 将可写页面标记COW fork page
+        if(flags & PTE_W) {
+          flags = (flags | PTE_F) & ~PTE_W;  // 在父子进程中清除可写标志
+          *pte = PA2PTE(pa) | flags;
+        }
+
+        // if((mem = kalloc()) == 0)
+        //   goto err;
+        // memmove(mem, (char*)pa, PGSIZE);
+        if(mappages(new, i, PGSIZE, pa, flags) != 0){  // map parent's pa to child's va
+          // kfree(mem);
+          goto err;
+        }
+      }
+      return 0;
+
+    err:
+    //   uvmunmap(new, 0, i / PGSIZE, 1);
+      return -1;
+    }
+    ```
+
+1. 修改```usertrap()```以识别页面错误。当COW页面出现页面错误时，使用```kalloc()```分配一个新页面，并将旧页面复制到新页面，然后将新页面添加到PTE中并设置```PTE_W```。
+    ```c
+    // trap.c
+    void
+    usertrap(void)
+    {
+      //...
+      uint64 cause = r_scause();
+      if(cause == 8){
+        //...
+      } else if((which_dev = devintr()) != 0){
+        // ok
+      } 
+      else if(cause == 13 || cause == 15) {  // page fault
+        uint64 va = r_staval();  // where the page fault is
+        if(va >= p->sz)
+          p->killed = 1;
+        // if (va对应PTE的PTE_F被设置)
+          // char *pa = kalloc(); 给va分配新的页面
+          // memmove(pa, (char*)walkaddr(p->pageteble, va)); 将对应的pa copy 到新page
+          // 用mappages将pa映射到va上
+      }
+      else {
+        //...
+      }
+    //...
+    }
+    ```
+    为了实现上述方法，在***vm.c***中新增一个函数:  ```cowalloc```用来判断是否为COW fork va并执行后续操作（分配、复制、修改标志位、映射等）：
+    ```c
+    // end of vm.c
+    /**
+     * @brief COW fork allocator
+     * @param mem new physical page for child process
+     * @param pa parent's physical page
+     * @return 0 => alloc failed
+     * @return the physical address va eventually mapped to
+    */
+    void*
+    cowalloc(pagetable_t pagetable, uint64 va)
+    {
+      pte_t* pte = walk(pagetable, va, 0);  
+      if(pte == 0) 
+        return 0;  // Invalid pte
+      if((*pte & PTE_F) == 0)  // Check if va is on COW fork page
+        return 0;
+
+      uint64 pa = walkaddr(pagetable, va);  // Get PA
+      if(pa == 0)
+        return 0;  // not mapped
+
+      char* mem = kalloc();  
+      if(mem == 0)
+        return 0;  // OOM
+      
+      // Copy parent's physical page to Child's physical page mem
+      memmove(mem, (char*)pa, PGSIZE);
+      
+      // clear PTE_V so that we can use mappages() to map again
+      *pte &= ~PTE_V;  
+      
+      // Map va to mem, set PTE_W to 1, clear PTE_F
+      if(mappages(pagetable, va, PGSIZE, (uint64)mem, (PTE_FLAGS(*pte) | PTE_W) & ~PTE_F) != 0) {
+        kfree(mem);
+        *pte |= PTE_V;  // Reset PTE_V incase cowalloc failed but we still need to use this PTE
+        return 0;
+      }
+
+      return (void*)mem;
+    }
+    ```
+    然后在***kernel/defs.h***中添加必要的定义，在```usertrap```中添加调用
+    ```c
+    // kernel/defs.h
+    // vm.c
+    //...
+    void*           cowalloc(pagetable_t, uint64);
+    ```
+    ```c
+    // kernel/trap.c
+    else if(cause == 13 || cause == 15) {  // page fault
+    uint64 va = r_staval();  // where the page fault is
+    if(va >= p->sz)
+      p->killed = 1;
+    if(cowalloc(p->pagetable, va) == 0)  // alloc new page for COW fork va
+      p->killed = 1;
+    }
+    ```
+1. 现在来处理“引用计数”的问题
