@@ -4989,7 +4989,11 @@ A: 取决于你如何对PLIC进行编程。对于XV6来说，所有的CPU都能�
     }
     ```
     </details>
-    ```uartstart```函数首先检查当前设备是否空闲，如果空闲的话，会从buffer中读出数据，然后将数据写入到**THR（Transmission Holding Register）**发送寄存器。这里相当于告诉设备，我这里有一个字节需要你来发送。一旦数据送到了设备，系统调用会返回，用户应用程序Shell就可以继续执行。这里从内核返回到用户空间的机制与lec[06](#sret)的trap机制是一样的。
+    
+    ```uartstart```函数首先检查当前设备是否空闲，如果空闲的话，会从buffer中读出数据，然后将数据写入到**THR（Transmission Holding Register）** 发送寄存器。这里相当于告诉设备，我这里有一个字节需要你来发送。一旦数据送到了设备，系统调用会返回，用户应用程序Shell就可以继续执行。这里从内核返回到用户空间的机制与lec[06](#sret)的trap机制是一样的。
+
+**总结：**
+![](./image/MIT6.S081/$2console.png)
 
 ## 9.6 UART驱动的bottom部分
 **这一节主要讲向Console输出字符时，如果发生中断会怎么样。**
@@ -5137,6 +5141,9 @@ Q: 我们之所以需要锁是因为有多个CPU核，但是却只有一个Conso
 A: 是的，如我们之前说的驱动的top和bottom部分可以并行的运行。所以一个CPU核可以执行uartputc函数，而另个一CPU核可以执行uartintr函数，我们需要确保它们是串行执行的，而锁确保了这一点。
 ***
 
+**总结：**
+![](./image/MIT6.S081/c2console.png)
+
 ## 9.7 Interrupt相关的并发
 **中断相关的并发包括以下几种：**
 * **设备**与**CPU**并行运行。 也称为producer-consumer并行。
@@ -5262,7 +5269,258 @@ A: sleep会将当前在运行的进程存放于sleep数据中。它传入的参�
 ## 9.9 Interrupt的演进
 * 现代的设备相比之前做了更多的工作。所以在产生中断之前，设备上会执行大量的操作，这样可以减轻CPU的处理负担。所以现在硬件变得更加复杂。
 * **轮询(Polling)**:  除了依赖Interrupt，CPU可以一直读取外设的控制寄存器，来检查是否有数据。对于UART来说，我们可以一直读取RHR寄存器，来检查是否有数据。现在，CPU不停的在轮询设备，直到设备有了数据。 但是这种方法会浪费CPU去不停地检查寄存器（而不是没有中断时sleep）。适用于**快设备**。
-* 对于一些精心设计的驱动，它们会在polling和Interrupt之间动态切换（注，也就是网卡的NAPI）。
+* 对于一些精心设计的驱动，它们会在polling和Interrupt之间**动态切换**（注，也就是网卡的NAPI）。
+
+# Lec10 Multiprocessors and locking
+**预习内容：**
+* 书第六章
+* ***kernel/spinlock.h***
+* ***kernel/spinlock.c***
+
+## 10.1 为什么要使用锁
+* 如果系统调用并行的运行在多个CPU核上，那么它们可能会并行的访问内核中共享的数据结构。例如一个核在读取数据，另一个核在写入数据，我们需要使用锁来**协调对于共享数据的更新**，以确保数据的一致性。
+* 锁会使得系统调用**串行**执行，最后反过来又**限制了性能**。
+* 当一份共享数据同时被读写时，如果没有锁的话，可能会出现**race condition**，进而导致程序出错。
+* **竞态条件(race condition)**:
+   A race condition or race hazard is the condition of an electronics, software, or other system where the system's substantive behavior is dependent on the sequence or timing of other uncontrollable events. It becomes a bug when one or more of the possible behaviors is undesirable.   *-- wiki*
+   简单来说 race condition 是系统存在的一种潜在风险，这种风险是由于**系统的输出依赖着不可控事件的执行顺序或者执行时间**。一旦这些不可控事件不满足预期，系统就会出现 bug。
+
+## 10.2 如和避免race conditon?
+![](./image/MIT6.S081/lock_p1.png)
+![](./image/MIT6.S081/lock_p2.png)
+
+假设链表位于两个CPU共享的内存中，这两个CPU使用```load```和```store```指令操作链表。代码可能这样：
+```c
+struct element {
+    int data;
+    struct element *next;
+}; 
+
+struct element *list = 0;
+
+void 
+push(int data)
+{
+    struct element *l;
+
+    l = malloc(sizeof *l);
+    l->data = data;
+    l->next = list;
+    list = l; 
+}
+
+```
+如果两个CPU同时执行```push```，如图6.1所示，两个CPU都可能在执行第16行之前执行第15行，这会导致如图6.2所示的不正确的结果。然后会有两个类型为```element```的列表元素使用```next```指针设置为```list```的前一个值。当两次执行位于第16行的对```list```的赋值时，第二次赋值将覆盖第一次赋值；第一次赋值中涉及的元素将丢失。为了解决这种内存资源争用问题我们需要使用锁。
+
+* 锁是一个对象，有一个结构体叫做```lock```，它包含的一些字段维护了锁的状态。锁有非常直观的API：
+    1. ```acquire```，接收指向lock的指针作为参数。```acquire```确保了在任何时间，只会有一个进程能够成功的获取锁。
+    1. ```release```，也接收指向lock的指针作为参数。在同一时间尝试获取锁的其他进程需要等待，直到持有锁的进程对锁调用r```elease```。
+
+*  锁的```acquire```和```release```之间的代码，通常被称为**临界区域(critical section)**。其中的代码会以**原子**的方式执行共享数据的更新。
+* 锁**序列化**了代码的执行。如果两个处理器想要进入到同一个critical section中，只会有一个能成功进入，另一个处理器会在第一个处理器从critical section中退出之后再进入。
+
+
+## 10.3 什么时候使用锁？
+* **保守规则：** 如果两个进程访问了一个共享的数据结构，并且**其中一个**进程会**更新**共享的数据结构，那么就需要对于这个共享的数据结构加锁。
+*  其他需要锁的情况：```printf```. 因为我们想要它的输出序列化而不是交织输出 。
+*  任何时间最多只能有一个进程持有锁。
+
+## 10.4 锁的特性和死锁
+* 通常锁有3种作用：
+    1. 避免丢失更新。
+    1. 打包多个操作，使它们具有原子性。
+    1. 维护共享数据结构的不变性。
+* **死锁(dead lock)：** 在critical section中，acquire同一个锁；第二个acquire必须要等到第一个acquire状态被release了才能继续执行，但是不继续执行的话又走不到第一个release，所以程序就会一直卡在这。因此如果XV6看到了同一个进程多次acquire同一个锁，就会触发一个panic。
+* 另一种死锁--**deadly embrace:** 
+![](./image/MIT6.S081/deadly_embrace.png)
+设现在我们有两个CPU，一个是CPU1，另一个是CPU2。CPU1执行rename将文件d1/x移到d2/y，CPU2执行rename将文件d2/a移到d1/b。这里CPU1将文件从d1移到d2，CPU2正好相反将文件从d2移到d1。我们假设我们按照参数的顺序来acquire锁，那么CPU1会先获取d1的锁，如果程序是真正的并行运行，CPU2同时也会获取d2的锁。之后CPU1需要获取d2的锁，这里不能成功，因为CPU2现在持有锁，所以CPU1会停在这个位置等待d2的锁释放。而另一个CPU2，接下来会获取d1的锁，它也不能成功，因为CPU1现在持有锁。
+**解决方案：** 对锁进行排序，所有的操作都必须以相同的顺序获取锁。*所以对于一个系统设计者，你需要确定对于所有的锁对象（至少是被共同使用的锁）的全局的顺序。*
+
+## 10.5 锁与性能
+* 如果想要性能随着CPU的数量增加而增加，我们需要将**数据结构和锁**进行**拆分**。
+* 拆分并引入更多的锁时，会涉及到很多的工作，通常的开发流程是：
+    1. 先以coarse-grained lock（大锁）开始。
+    1. 再对程序进行测试，来看一下程序是否能使用多核。
+    1. 如果可以的话，那么工作就结束了，你对于锁的设计足够好了；如果不可以的话，那意味着锁存在竞争，多个进程会尝试获取同一个锁，因此它们将会序列化的执行，性能也上不去，之后你就需要重构程序。
+
+## 10.6 XV6中UART模块对于锁的使用
+* 查看***uart.c***中的锁：
+    ```c
+    // the transmit output buffer.
+    struct spinlock uart_tx_lock;
+    #define UART_TX_BUF_SIZE 32
+    char uart_tx_buf[UART_TX_BUF_SIZE];
+    int uart_tx_w; // write next to uart_tx_buf[uart_tx_w++]
+    int uart_tx_r; // read next from uart_tx_buf[uar_tx_r++]
+    ```
+    代码上看只有一个coarse-grained lock（大锁）```uart_tx_lock```, 它保护UART的传输缓存、写指针、读指针。
+* 数据结构有一些不变的特性，例如读指针需要追赶写指针；从读指针到写指针之间的数据是需要被发送到显示端；从写指针到读指针之间的是空闲槽位，锁帮助我们维护了这些特性不变。
+    ![](./image/MIT6.S081/prdc_cnsmr.png)
+* 在***uart.c***的```uartputc```函数中：
+    ```c
+    void
+    uartputc(int c)
+    {
+      acquire(&uart_tx_lock);   // 获得锁
+
+      if(panicked){
+        for(;;)
+          ;
+      }
+
+      while(1){
+        if(((uart_tx_w + 1) % UART_TX_BUF_SIZE) == uart_tx_r){
+          // buffer is full.
+          // wait for uartstart() to open up space in the buffer.
+          sleep(&uart_tx_r, &uart_tx_lock);
+        } else {  // buffer有空槽位
+          uart_tx_buf[uart_tx_w] = c;  // 将数据放于空槽位
+          uart_tx_w = (uart_tx_w + 1) % UART_TX_BUF_SIZE;  // 写指针+1
+          uartstart();
+          release(&uart_tx_lock);  // 释放锁
+          return;
+        }
+      }
+    }
+    ```
+    如果两个进程在同一个时间调用```uartputc```，那么这里的锁会确保来自于第一个进程的一个字符进入到缓存的第一个槽位，接下来第二个进程的一个字符进入到缓存的第二个槽位。
+
+* 在```uartstart()```函数中：
+    ```c
+    #define THR 0                 // transmit holding register (for output bytes)
+    //...
+    void
+    uartstart()
+    {
+      while(1){
+        if(uart_tx_w == uart_tx_r){
+          // transmit buffer is empty.
+          return;
+        }
+        
+        if((ReadReg(LSR) & LSR_TX_IDLE) == 0){
+          // the UART transmit holding register is full,
+          // so we cannot give it another byte.
+          // it will interrupt when it's ready for a new byte.
+          return;
+        }
+        
+        int c = uart_tx_buf[uart_tx_r];
+        uart_tx_r = (uart_tx_r + 1) % UART_TX_BUF_SIZE;
+        
+        // maybe uartputc() is waiting for space in the buffer.
+        wakeup(&uart_tx_r);
+        
+        WriteReg(THR, c);  // 写入硬件寄存器
+      }
+    }
+    ```
+    锁确保了我们可以在下一个字符写入到缓存之前，处理完缓存中的字符，这样缓存中的数据就不会被覆盖。
+    最后，锁确保了一个时间只有一个CPU上的进程可以写入UART的寄存器，THR。所以这里锁确保了硬件寄存器只有一个写入者。
+*  UART中断本身也可能与调用```printf```的进程并行执行。如果一个进程调用了```printf```，它运行在CPU0上；CPU1处理了UART中断，那么CPU1也会调用```uartstart```。因为我们想要确保对于THR寄存器只有一个写入者，同时也确保传输缓存的特性不变（*注，这里指的是在uartstart中对于uart_tx_r指针的更新*），我们需要**在中断处理函数中也获取锁**。
+    ```c
+    void
+    uartintr(void)
+    {
+      // read and process incoming characters.
+      while(1){
+        int c = uartgetc();
+        if(c == -1)
+          break;
+        consoleintr(c);
+      }
+
+      // send buffered characters.
+      acquire(&uart_tx_lock);
+      uartstart();
+      release(&uart_tx_lock);
+    }
+    ```
+    所以，在XV6中，驱动的**bottom部分**（注，也就是中断处理程序```uartintr```）和驱动的**top部分**（注，```uartputc```函数）可以完全的并行运行，所以中断处理程序也需要获取锁。
+
+## 10.7 自旋锁(Spin lock)的实现
+* 锁的特性就是**任何时间点都不能有超过一个的锁的持有者**。
+* 锁的```acquire```接口里有一个死循环，循环中判断锁对象的```lock```字段是否为0，是的话表明锁当前无持有者。不是的话则不能用```acquire```获取锁。
+    * **防止两个CPU同时读到```lock```为0的方法：** RISC-V的特殊硬件指令```amoswap```（atomic memory swap）
+    ```c
+    amoswap(addr, r1, r2)
+    ```
+    这条指令会先锁定住```addr```，将```addr```中的数据保存在一个临时变量中（```tmp```），之后将```r1```中的数据写入到```addr```中，之后再将保存在临时变量中的数据写入到```r2```中，最后再对于地址解锁。
+
+* 通过```amoswap```指令，确保了```addr```中的数据存放与```r2```, ```r1```中的数据存放于```addr```中。通过将软件锁变成硬件锁来实现了原子性。
+* 接下来看一下如何使用```amoswap```指令来实现自旋锁，查看***spinlock.h***:
+    ```c
+    struct spinlock {
+      uint locked;       // Is the lock held?
+
+      // For debugging:
+      char *name;        // Name of lock.
+      struct cpu *cpu;   // The cpu holding the lock.
+    };
+    ```
+    查看***spinlock.c***中的```acquire```函数:
+    ```c
+    // Acquire the lock.
+    // Loops (spins) until the lock is acquired.
+    void
+    acquire(struct spinlock *lk)
+    {
+      push_off(); // disable interrupts to avoid deadlock. 处理相同CPU上中断和普通程序间的并发
+      if(holding(lk))
+        panic("acquire");
+
+      // On RISC-V, sync_lock_test_and_set turns into an atomic swap:
+      //   a5 = 1
+      //   s1 = &lk->locked
+      //   amoswap.w.aq a5, a5, (s1)
+      while(__sync_lock_test_and_set(&lk->locked, 1) != 0)
+        ;
+
+      // Tell the C compiler and the processor to not move loads or stores
+      // past this point, to ensure that the critical section's memory
+      // references happen strictly after the lock is acquired.
+      // On RISC-V, this emits a fence instruction.
+      __sync_synchronize();
+
+      // Record info about lock acquisition for holding() and debugging.
+      lk->cpu = mycpu();
+    }
+    ```
+    ```acquire```函数最开始先**关闭中断**的原因是: 防止新的中断产生后，诸如```uartintr```的中断处理函数尝试获取之前被获取的同一把锁（```uartputc```获取的```uart_tx_lock```）时造成**死锁**。
+    这里面的while循环就是上面的test-and-set循环， C标准库已经定义了里面这些函数的操作。```__sync_lock_test_and_set```的行为可以通过查看***kernel.asm***得知：
+
+    ```asm
+    while(__sync_lock_test_and_set(&lk->locked, 1) != 0)
+      # 将寄存器 a4 的值移动到寄存器 a5
+      80000c5a:	87ba                	mv	a5,a4  
+      # 将 a5 中的值（即1）写入由 s1 寄存器指向的内存地址，
+      # 并将该地址之前的值加载到 a5。
+      # .aq 表示这个操作具有获取（Acquire）语义，
+      80000c5c:	0cf4a7af          	amoswap.w.aq	a5,a5,(s1)  
+      # 将 a5 中的值符号扩展到整个寄存器。这是为了处理可能的负值，确保值的正确性。
+      80000c60:	2781                	sext.w	a5,a5
+      # 如果 a5 不为零（即之前的内存位置已经被锁定），则跳转回 80000c5a 地址继续尝试获取锁。
+      80000c62:	ffe5                	bnez	a5,80000c5a <acquire+0x22>
+    ```
+    还可以查看```release```的实现：
+    ```asm
+    __sync_lock_release(&lk->locked);
+      80000d0a:	0f50000f          	fence	iorw,ow  # 内存屏障确保读写完成，iorw为前置，ow为后继
+      # 将 zero 寄存器（其值为0，表示释放锁）写入由 s1 寄存器指向的内存（锁）地址
+      # 目的是将锁的值设置为0，从而释放锁。
+      80000d0e:	0804a02f          	amoswap.w	zero,zero,(s1)  # 
+    ```
+    这里不直接使用store指令将lock字段写为0的原因是防止有其他CPU同时向lock字段写入数据。**store指令并不总是原子操作**，比如当参数过大时，它会分成两步指令来完成。
+
+* ```synchronize```指令用来确定指令的移动范围，禁止编译器将指令```locked<=1```和```x<-x+1```重新排序（否则在critical section与加解锁并发时会产生错误）。锁的```acquire```和```release```函数都包含了```synchronize```指令。
+***
+Q: 在一个处理器上运行多个线程与在多个处理器上运行多个进程是否一样？
+
+A: 差不多吧，如果你有多个线程，但是只有一个CPU，那么你还是会想要特定内核代码能够原子执行。所以你还是需要有critical section的概念。你或许不需要锁，但是你还是需要能够对特定的代码打开或者关闭中断。如果你查看一些操作系统的内核代码，通常它们都没有锁的acquire，因为它们假定自己都运行在单个处理器上，但是它们都有开关中断的操作。
+***
+
+
+
 
 # Lab6 Copy-on-Write Fork for xv6
 **这个实验涉及到锁，因此建议学完Lec10再做。**
