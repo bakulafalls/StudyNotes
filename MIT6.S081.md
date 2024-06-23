@@ -5985,3 +5985,390 @@ $
     ```
 **测试结果**：
 ![](./image/MIT6.S081/cowpassed.png)
+
+#  Lec11 Thread switching
+**预习内容：**
+* 书第七章 7.1-7.4
+* ***kernel/proc.c***
+* ***kernel/swtch.S***
+
+## 11.1 线程（Thread）概述
+* 需要多线程的原因：
+    1. 希望计算机在**同一时间不只执行一个任务**
+    1. 可以让**程序结构变简单**，减少复杂度
+    1. 通过并行计算，在有多核CPU的计算机上获得**更快的处理速度**
+
+* 一个线程可以任务是串行执行代码的单元
+* 线程具有**状态**，包含三个部分：
+    1. **程序计数器(Program Counter)**， 它表示当前线程执行指令的位置
+    1. **保存变量的寄存器**
+    1. 程序的**栈（Stack）**。*通常来说每个程序都有属于自己的stack, stack记录了函数调用的记录，并反应了当前线程的起点*
+
+* 多线程的并行运行主要有两个策略：
+    1. 在多核处理器上使用多个CPU
+    1. **一个CPU在多个线程之前来回切换** (本课关注的)
+
+* XV6内核有两种线程系统：
+    1. 线程之间**共享内存**：例如**内核线程**， 对于每个用户进程都有一个内核线程来执行来自用户进程的系统调用，所有的内核线程都共享了内核内存。
+    1. 线程之间**共享内存**: 例如上面提到的每个用户进程包含的线程，由于每个用户进程都有自己独立的内存空间，所以xv6的用户线程之间没有共享内存（*因为它不允许一个用户进程包含多个线程，Linux可以实现一个运行在多个CPU核上的用户进程*）。
+
+## 11.2 xv6线程调度
+* 实现内核中线程系统的挑战：
+    1. **如何实现线程间的切换**。停止一个线程的运行并启动另一个线程的过程称为**线程调度(Scheduling)**。xv6为每个CPU核都创建了一个**线程调度器(Scheduler)**。
+    1. **切换线程时需要保存并恢复线程的状态**。What：pc and regs  &   Where：trapframe
+    1. **如何处理运算密集型线程(compute bound thread)**。这种线程耗费时间很长，我们需要撤回它对于CPU的控制，将其放置于一边，稍后再运行它。
+
+* 每个CPU核上有一个能够**定时产生中断**的硬件设备，让内核从用户空间获取CPU控制权。之后内核中的定时器中断处理程序会自愿将CPU**出让(yield)** 给线程调度器scheduler，并通知其可以让其他线程运行了。这样的处理流程称为**pre-emptive scheduling**, 意为用户代码没有让出CPU，而是定时器中断将CPU控制权拿走的。与之对应的是**voluntary scheduling**。
+* 执行线程调度时，操作系统需要区分几类线程, 它们有对应的state：
+    1. 当前在CPU上线程                                => ```RUNNING```
+    1. 一旦CPU有空闲就想运行的线程                     => ```RUNABLE```
+    1. 不行运行在CPU上的线程(可能在等待I/O或其他事件)   => ```SLEEPING```
+
+## 11.3 xv6线程切换
+* 在定时器中断程序中，如果XV6内核决定从一个用户进程切换到另一个用户进程，那么首先在内核中第一个进程的内核线程会被切换到第二个进程的内核线程。之后再在第二个进程的内核线程中返回到用户空间的第二个进程，这里返回通过恢复trapframe中保存的用户进程状态完成。
+![thread_switch](./image/MIT6.S081/thread_switch.png)
+① 一个定时器中断强迫CPU从用户空间进程切换到内核，trampoline代码将用户寄存器保存于用户进程对应的trapframe对象中；
+② 之后在内核中运行usertrap，来实际执行相应的中断处理程序。这时，CPU正在进程P1的内核线程和内核栈上，执行内核中普通的C代码；
+③ 假设进程P1（C compiler）对应的内核线程决定它想出让CPU，它会做很多工作，最后它会调用```swtch```函数。```swtch```函数会:
+    1. 先保存自己的寄存器到调度器线程的context对象
+    2. 找到进程P2（LS）之前保存的context，恢复其中的寄存器
+    3. 因为进程P2在进入RUNABLE状态之前必然也调用了```swtch```函数。所以之前的```swtch```函数会被恢复，并返回到进程P2所在的系统调用或者中断处理程序中（注，因为P2进程之前调用swtch函数必然在系统调用或者中断处理程序中）。
+④ 不论是系统调用也好中断处理程序也好，P2在从用户空间进入到内核空间时会保存用户寄存器到trapframe对象。所以当内核程序执行完成之后，trapframe中的P2用户寄存器会被恢复。最后用户进程P2就恢复运行了
+
+* 每个CPU都有一个完全不同的调度器线程。调度器线程是一种内核线程，它有自己的context对象。任何运行在CPU1上的进程，当它决定出让CPU，它都会切换到CPU1对应的调度器线程，并由调度器线程切换到下一个进程。
+
+***
+Q: context保存在哪？
+A: 每一个内核线程都有一个context对象。但是内核线程实际上有两类。每一个用户进程有一个对应的内核线程，它的context对象保存在用户进程对应的proc结构体中。
+每一个调度器线程，它也有自己的context对象，但是它却没有对应的进程和proc结构体，所以调度器线程的context对象保存在cpu结构体中。在内核中，有一个cpu结构体的数组，每个cpu结构体对应一个CPU核，每个结构体中都有一个context字段。
+![](./image/MIT6.S081/context.png)
+
+Q: 为什么不能将context对象保存在进程对应的trapframe中？
+A: context可以保存在trapframe中，因为每一个进程都只有一个内核线程对应的一组寄存器，我们可以将这些寄存器保存在任何一个与进程一一对应的数据结构中。对于每个进程来说，有一个proc结构体，有一个trapframe结构体，所以我们可以将context保存于trapframe中。但是或许出于简化代码或者让代码更清晰的目的，trapframe还是只包含进入和离开内核时的数据。而context结构体中包含的是在内核线程和调度器线程之间切换时，需要保存和恢复的数据。
+
+Q: 每一个CPU的调度器线程有自己的栈吗？
+A: 是的，每一个调度器线程都有自己独立的栈。实际上调度器线程的所有内容，包括栈和context，与用户进程不一样，都是在系统启动时就设置好了。如果你查看XV6的start.s（注：是***entry.S***和***start.c***）文件，你就可以看到为每个CPU核设置好调度器线程。
+***
+* 每个CPU核在一个时间只会运行一个线程，它要么是运行用户进程的线程，要么是运行内核线程，要么是运行这个CPU核对应的调度器线程。
+* 每一个线程要么是只运行在一个CPU核上，要么它的状态被保存在context中。线程永远不会运行在多个CPU核上，线程要么运行在一个CPU核上，要么就没有运行。
+* 在XV6的代码中，context对象总是由```swtch```函数产生.
+
+## 11.4 xv6线程切换示例程序
+* 重新审视一下```proc```结构体：
+    ```c
+    struct proc {
+      struct spinlock lock;
+
+      // p->lock must be held when using these:
+      enum procstate state;        // Process state
+      void *chan;                  // If non-zero, sleeping on chan
+      int killed;                  // If non-zero, have been killed
+      int xstate;                  // Exit status to be returned to parent's wait
+      int pid;                     // Process ID
+
+      // wait_lock must be held when using this:
+      struct proc *parent;         // Parent process
+
+      // these are private to the process, so p->lock need not be held.
+      uint64 kstack;               // Virtual address of kernel stack
+      uint64 sz;                   // Size of process memory (bytes)
+      pagetable_t pagetable;       // User page table
+      struct trapframe *trapframe; // data page for trampoline.S
+      struct context context;      // swtch() here to run process
+      struct file *ofile[NOFILE];  // Open files
+      struct inode *cwd;           // Current directory
+      char name[16];               // Process name (debugging)
+
+      int mask;
+    };
+    ```
+    ```trapframe``` 用于保存用户空间线程寄存器
+    ```context```用于保存内核线程寄存器
+    ```kstack```用于保存当前进程内核栈
+    ```state```保存当前进程状态
+    ```lock```保护很多数据，包括```state```等
+
+* 实验：在user文件夹中添加一个```spin.c```，并在Makefile中加上	```$U/_spin\```
+    ```c
+    //
+    // spin.c
+    //
+
+    #include "kernel/types.h"
+    #include "user/user.h"
+
+    int
+    main(int argc, char *argv[])
+    {
+      int pid;
+      char c;
+
+      pid = fork();
+      if(pid == 0) {
+        c = '/';
+      }
+      else {
+        printf("parent pid is %d, child is %d\n", getpid(), pid);
+        c = '\\';
+      }
+
+      for(int i = 0; ; i++) {
+        if((i % 1000000) == 0) 
+          write(2, &c, 1);
+      }
+
+      exit(0);
+    }
+    ```
+    这个程序会创建两个进程，两个进程都会进入死循环，每隔1000000次循环打印一个输出来表示程序还在运行，它们不会主动让出CPU，相当于两个**运算密集型线程**。启动xv6时设置只有一个CPU来让它们运行在同一个CPU上。
+    运行时输出如下：
+    ![spin](./image/MIT6.S081/spin.png)
+    可以直观看到xv6每隔一会在两个进程之间切换
+
+* 接下来在***trap.c***中的```devintr```函数中的204行设置一个断点，这一行会识别出当前是在响应定时器中断:
+    ![](./image/MIT6.S081/spin2.png)
+
+*   使用```finish```来从devintr函数返回到```usertrap```函数。可以看到如C代码那样返回值是2, 这样按照```usertrap```中的逻辑，接下来会运行```yield```函数
+    ```c
+    // trap.c
+     else if((which_dev = devintr()) != 0){
+    // ok
+    }
+    //...
+    // give up the CPU if this is a timer interrupt.
+    if(which_dev == 2)
+      yield();
+    ```
+    ![](./image/MIT6.S081/spin3.png)
+    这时我们可以打印```p->name```，```p->pid```以及```trapframe```中的寄存器信息来查看当前进程的一些信息
+    ![](./image/MIT6.S081/spin4.png)
+    通过查看***spin.asm***可以看到定时器中断触发时，用户进程正在执行死循环的加1.
+
+***
+Q: 当一个线程结束执行了，比如说在用户空间通过```exit```系统调用结束线程，同时也会关闭进程的内核线程。那么线程结束之后和下一个定时器中断之间这段时间，CPU仍然会被这个线程占有吗？还是说我们在结束线程的时候会启动一个新的线程？
+A: ```exit```系统调用会出让CPU。尽管我们这节课主要是基于定时器中断来讨论，但是实际上XV6切换线程的绝大部分场景都不是因为定时器中断，比如说一些系统调用在等待一些事件并决定让出CPU。```exit```系统调用会做各种操作然后调用```yield```函数来出让CPU，这里的出让并不依赖定时器中断。
+*** 
+
+## 11.6 XV6线程切换 --- yield/sched函数
+* 继续运行程序使其走到```yield```函数
+    ```c
+    // Give up the CPU for one scheduling round.
+    void
+    yield(void)
+    {
+      struct proc *p = myproc();
+      acquire(&p->lock);
+      p->state = RUNNABLE;
+      sched();
+      release(&p->lock);
+    }
+    ```
+    在锁释放前，```yield```要将进程的状态改为```RUNABLE```, 但实际上这时候进程还在运行。因此这里加锁的目的之一是：即使我们将进程的状态改为了```RUNABLE```，其他的CPU核的调度器线程也不可能看到进程的状态为```RUNABLE```并尝试运行它。否则的话，进程就会在两个CPU核上运行了。
+* 之后```yield```会调用***proc.c***中的```sched```函数：
+    ```c
+    // Switch to scheduler.  Must hold only p->lock
+    // and have changed proc->state. Saves and restores
+    // intena because intena is a property of this
+    // kernel thread, not this CPU. It should
+    // be proc->intena and proc->noff, but that would
+    // break in the few places where a lock is held but
+    // there's no process.
+    void
+    sched(void)
+    {
+      int intena;
+      struct proc *p = myproc();
+
+      if(!holding(&p->lock))
+        panic("sched p->lock");
+      if(mycpu()->noff != 1)
+        panic("sched locks");
+      if(p->state == RUNNING)
+        panic("sched running");
+      if(intr_get())
+        panic("sched interruptible");
+
+      intena = mycpu()->intena;
+      swtch(&p->context, &mycpu()->context);  // 将当前寄存器保存到第一个参数，从第二个参数加载值到当前寄存器中
+      mycpu()->intena = intena;
+    }
+    ```
+    可以看到它只是做了一些合理性检查，然后进入底部的```swtch```函数
+
+## 11.6 XV6线程切换 --- swtch函数
+* 打印将要切换到的（调度器线程的）context,在gdb中```print cpus[0].context```:
+![](./image/MIT6.S081/swtch.png)
+其中```ra```(Return address)保存当前函数(```swtch```)的返回地址，在***kernel.asm***中查看这个地址，看到我们将要返回到```scheduler```(调度器)函数中。
+* ```swtch```函数位于***swtch.S***中：
+    ```c
+    .globl swtch
+    swtch:
+            sd ra, 0(a0)  # 
+            sd sp, 8(a0)
+            sd s0, 16(a0)
+            sd s1, 24(a0)
+            sd s2, 32(a0)
+            sd s3, 40(a0)
+            sd s4, 48(a0)
+            sd s5, 56(a0)
+            sd s6, 64(a0)
+            sd s7, 72(a0)
+            sd s8, 80(a0)
+            sd s9, 88(a0)
+            sd s10, 96(a0)
+            sd s11, 104(a0)
+
+            ld ra, 0(a1)
+            ld sp, 8(a1)
+            ld s0, 16(a1)
+            ld s1, 24(a1)
+            ld s2, 32(a1)
+            ld s3, 40(a1)
+            ld s4, 48(a1)
+            ld s5, 56(a1)
+            ld s6, 64(a1)
+            ld s7, 72(a1)
+            ld s8, 80(a1)
+            ld s9, 88(a1)
+            ld s10, 96(a1)
+            ld s11, 104(a1)
+            
+            ret
+    ```
+    函数中上半部分是**将当前的寄存器保存在当前线程对应的context对象中**，也就是```swtch```函数的第一个参数```&p->context```;
+    函数的下半部分是**将调度器线程的寄存器，也就是我们将要切换到的线程的寄存器恢复到CPU的寄存器中**,恢复的也就是```swtch```函数的第二个参数 ```&mycpu()->context```。
+
+    ![](./image/MIT6.S081/swtch_context.png)
+
+    上半部分保存到进程context中的```ra```寄存器可以通过```print $ra```来查看：
+    ![](./image/MIT6.S081/print_ra.png)
+    可以看到它指向了```sched```函数（因为```swtch```函数代码中最后要返回调用它的```sched```）
+***
+Q: 为什么RISC-V中有32个寄存器，但是```swtch```函数中只保存并恢复了14个寄存器？
+A: 因为switch是按照一个普通函数来调用的，对于有些寄存器，```swtch```函数的调用者默认```swtch```函数会做修改，所以调用者已经在自己的栈上保存了这些寄存器，当函数返回时，这些寄存器会自动恢复。所以```swtch```函数里只需要保存Callee Saved Register就行。（注，详见[5.4](#reg)）
+***
+* 查看```sp```（stack pointer）寄存器：
+    ![](./image/MIT6.S081/print_sp1.png)
+    它实际是当前进程的内核栈地址，它由虚拟内存系统映射在了一个高地址。
+
+* 运行至```swtch```函数返回前，再次打印```sp```，可以看见值不一样了：
+    ![](./image/MIT6.S081/print_sp3.png)
+    ```sp```现在的值位于内存的Stack0区域中。这个区域实际上是在启动顺序中非常非常早的一个位置，***start.s***在这个区域创建了栈，这样才可以调用第一个C函数。所以**调度器线程运行在CPU对应的bootstack上**。
+    查看```ra```寄存器：
+    ![](./image/MIT6.S081/print_ra3.png)
+    现在指向了scheduler函数，因为我们恢复了调度器线程的context对象中的内容。
+
+* **现在，我们其实已经在调度器线程中了**。虽然我们还在```swtch```函数中，但是现在我们实际上位于调度器线程调用的```swtch```函数中。调度器线程在启动过程中调用的也是```swtch```函数。接下来通过执行```ret```指令，我们就可以返回到调度器线程中。
+
+***
+Q : 我不知道我们使用的RISC-V处理器是不是有一些其他的状态？但是我知道一些Intel的X86芯片有floating point unit state等其他的状态，我们需要处理这些状态吗？
+A: 你的观点非常对。在一些其他处理器例如X86中，线程切换的细节略有不同，因为不同的处理器有不同的状态。所以我们这里介绍的代码非常依赖RISC-V。其他处理器的线程切换流程可能看起来会非常的不一样，比如说可能要保存floating point寄存器。我不知道RISC-V如何处理浮点数，但是XV6内核并没有使用浮点数，所以不必担心。但是是的，**线程切换与处理器非常相关**。
+
+Q: 为什么swtch函数要用汇编来实现，而不是C语言？
+A：C语言中很难与寄存器交互。可以肯定的是C语言中没有方法能更改sp、ra寄存器。所以在普通的C语言中很难完成寄存器的存储和加载，唯一的方法就是在C中嵌套汇编语言。所以我们也可以在C函数中内嵌switch中的指令，但是这跟我们直接定义一个汇编函数是一样的。或者说swtch函数中的操作是在C语言的层级之下，所以并不能使用C语言。
+***
+
+## 11.7 XV6线程切换 --- scheduler函数
+* 查看scheduler的代码：
+    ```c
+    // Per-CPU process scheduler.
+    // Each CPU calls scheduler() after setting itself up.
+    // Scheduler never returns.  It loops, doing:
+    //  - choose a process to run.
+    //  - swtch to start running that process.
+    //  - eventually that process transfers control
+    //    via swtch back to the scheduler.
+    void
+    scheduler(void)
+    {
+      struct proc *p;
+      struct cpu *c = mycpu();
+      
+      c->proc = 0;
+      for(;;){
+        // Avoid deadlock by ensuring that devices can interrupt.
+        intr_on();
+
+        for(p = proc; p < &proc[NPROC]; p++) {
+          acquire(&p->lock);
+          if(p->state == RUNNABLE) {
+            // Switch to chosen process.  It is the process's job
+            // to release its lock and then reacquire it
+            // before jumping back to us.
+            p->state = RUNNING;
+            c->proc = p;
+            swtch(&c->context, &p->context);
+
+            // Process is done running for now.
+            // It should have changed its p->state before coming back.
+            c->proc = 0;
+          }
+          release(&p->lock);  
+        }
+      }
+    }
+    ```
+    由于已经停止了spin进程的运行，现在并没有在这个CPU核上运行这个进程， 为了不让人困惑，抹去spin进程的记录，将```c->proc```设置为0。
+    这里的```swtch```作用：
+    ![](./image/MIT6.S081/swtch2.png)
+    执行完这里的```swtch```后
+
+* ```sched```中的锁保护3个步骤：
+    1. 进程状态```RUNNING``` => ```RUNABLE```
+    1. 将进程寄存器保存在```p->context```对象中
+    1. 停止使用当前进程的栈： ```c->proc = 0;```
+
+* ```scheduler```中的锁保护：
+    1. 新进程状态```RUNABLE``` => ```RUNNING```
+    1. 将新进程的Context移至RISC-V寄存器中
+    1. 通过加锁关闭中断，以免定时器中断看到还在切换过程中的进程
+
+* 在找到RUNNABLE的进程的位置设置断点，使程序运行到该处。
+    ![](./image/MIT6.S081/spin5.png)
+    在463行程序又会调用```swtch```去保存调度器线程的寄存器，恢复目标进程的寄存器。
+    打印现在这个新进程的pid，可以看到已经变成了4.
+
+* 打印目标进程的context对象和其中的```ra```寄存器：
+    ![](./image/MIT6.S081/spin6.png)
+    可以看到```ra```寄存器指向了我们要切换到的目标线程, 为```sched```函数.
+
+* 这里有件事情需要注意，调度器线程调用了```swtch```函数，但是我们从```swtch```函数返回时，实际上是返回到了对于```switch```的另一个调用，而不是调度器线程中的调用。**我们返回到的是pid为4的进程在很久之前对于switch的调用**.
+* ```swtch```函数是线程切换的核心，但是```swtch```函数中只有保存寄存器，再加载寄存器的操作。线程除了寄存器以外的还有很多其他状态，它有变量，堆中的数据等等，但是所有的这些数据都在内存中，并且会保持不变。我们没有改变线程的任何栈或者堆数据。
+
+## 11.8 XV6线程第一次调用switch函数
+* 当调用```swtch```函数的时候，实际上是从一个线程对于```switch```的调用切换到了另一个线程对于```switch```的调用。所以线程第一次调用```swtch```函数时，需要伪造一个“另一个线程”对于```switch```的调用，因为不能通过```swtch```函数随机跳到其他代码去。
+* 看一下第一次调用``switch``时，“另一个”调用```swtch```函数的线程的context对象。***proc.c***文件中的```allocproc```函数会被启动时的第一个进程和```fork```调用，```allocproc```会设置好新进程的context，如下所示：
+    ```c
+    // Set up new context to start executing at forkret,
+    // which returns to user space.
+    memset(&p->context, 0, sizeof(p->context));
+    p->context.ra = (uint64)forkret;
+    p->context.sp = p->kstack + PGSIZE;
+
+    return p;
+    ```
+    这里设置的```forkret```函数就是进程的第一次调用```swtch```函数会切换到的“另一个”线程位置。
+    ```c
+    // A fork child's very first scheduling by scheduler()
+    // will swtch to forkret.
+    void
+    forkret(void)
+    {
+      static int first = 1;
+
+      // Still holding p->lock from scheduler.
+      release(&myproc()->lock);
+
+      if (first) {
+        // File system initialization must be run in the context of a
+        // regular process (e.g., because it calls sleep), and thus cannot
+        // be run from main().
+        first = 0;
+        fsinit(ROOTDEV);
+      }
+
+      usertrapret();
+    }
+    ```
+    从代码中看，它的工作其实就是释放调度器之前获取的锁。函数最后的```usertrapret```函数其实也是一个假的函数，它会使得程序表现的看起来像是从trap中返回，但是对应的trapframe其实也是假的，这样才能跳到用户的第一个指令中。
+    ```if(first)```是为了文件系统初始化。具体来说，需要从磁盘读取一些数据来确保文件系统的运行，比如说文件系统究竟有多大，各种各样的东西在文件系统的哪个位置，同时还需要有crash recovery log。完成任何文件系统的操作都需要等待磁盘操作结束，但是XV6只能在进程的context下执行文件系统操作，比如等待I/O。所以初始化文件系统需要等到我们有了一个进程才能进行。而这一步是在第一次调用```forkret```时完成的，所以在```forkret```中才有了```if(first)```判断。
