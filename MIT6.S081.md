@@ -7121,3 +7121,309 @@ barrier()
 
 **make grade测试结果：**
 ![](./image/MIT6.S081/thread_grade.png)
+
+# Lec14 File systems
+**预习内容：**
+* 书第八章 8.1-8.3
+* ***kernel/bio.c***
+* ***kernel/fs.c***
+* ***kernel/sysfile.c***
+* ***kernel/file.c***
+
+**预习记录：**
+* 文件系统解决的难题：
+    1. 文件系统需要磁盘上的数据结构来表示目录和文件名称树，记录保存每个文件内容的块的标识，以及记录磁盘的哪些区域是空闲的。
+    1. 文件系统必须支持崩溃恢复（crash recovery）。也就是说，如果发生崩溃（例如，电源故障），文件系统必须在重新启动后仍能正常工作。风险在于崩溃可能会中断一系列更新，并使磁盘上的数据结构不一致（例如，一个块在某个文件中使用但同时仍被标记为空闲）。
+    1. 不同的进程可能同时在文件系统上运行，因此文件系统代码必须协调以保持不变量。
+    1. 访问磁盘的速度比访问内存慢几个数量级，因此文件系统必须保持常用块的内存缓存。
+
+* xv6的7层文件系统
+
+|                层级                |                                    功能                                    |
+|:----------------------------------:|:--------------------------------------------------------------------------:|
+| **文件描述符(File descriptor)**    | 使用文件系统接口抽象了许多Unix资源                                         |
+| **路径名（Pathname）**             | 提供了分层路径名，并通过递归查找来解析它们                                 |
+| **目录（Directory）**              | 将每个目录实现为一种特殊的索引结点                                         |
+| **索引结点（Inode）**              | 提供单独的文件，每个文件表示为一个索引结点                                 |
+| **日志（Logging）**                | 允许更高层在一次事务中将更新包装到多个块，并确保在遇到崩溃时自动更新这些块 |
+| **缓冲区高速缓存（Buffer cache）** | 缓存磁盘块并同步对它们的访问                                               |
+| **磁盘（Disk）**                   | 磁盘层读取和写入virtio硬盘上的块                                           |
+
+
+
+##  14.1 Why interesting
+* 文件系统对于硬件的抽象较为有用
+* **crash safety**：有可能在文件系统的操作过程中，计算机崩溃了，在重启之后你的文件系统仍然能保持完好，文件系统的数据仍然存在，并且你可以继续使用你的大部分文件。
+* **如何在磁盘上排布文件系统：** 磁盘上有一些数据结构表示了文件系统的结构和内容。xv6使用的数据结构比真实的操作系统简单很多 。
+* **如何提升性能：** 尽量避免写磁盘。使用并发。
+
+## 14.2 File system实现概述
+* XV6和所有的Unix文件系统都支持通过系统调用创建链接，给同一个文件指定多个名字。比如:
+    ```c
+    link("x/y", "x/z");  // 为文件x/y创建另一个名字x/z
+    ```
+* 还可以删除或者更新文件的命名空间，用户可以通过```unlink```来删除特定的文件名。如果此时对应的文件描述符是打开的状态，那我们还可以向文件写数据：
+    ```c
+    unlink("x/y");
+    write(fd, "def", 3);
+    ```
+
+* 因此在文件系统内部，**文件描述符必然与某个不依赖文件名的对象关联**， 这样即使文件名变化了，文件描述符仍然能够指向或者引用相同的文件对象。    
+*  文件系统通常由操作系统提供，而数据库如果没有直接访问磁盘的权限的话，通常是在文件系统之上实现的（注，*早期数据库通常直接基于磁盘构建自己的文件系统，因为早期操作系统自带的文件系统在性能上较差，且写入不是同步的，进而导致数据库的ACID不能保证。不过现代操作系统自带的文件系统已经足够好，所以现代的数据库大部分构建在操作系统自带的文件系统之上*）。
+* **inode**代表一个文件的对象，并且 不依赖于文件名。文件系统内部通过一个数字，而不是通过文件路径名引用inode。
+*  inode只有当link cout（文件名数量）和openfd count（当前打开的文件描述符计数）都为0时才能被删除。 
+* 文件系统中核心的数据结构是**inode**和**file descriptor**。后者主要与用户进程进行交互。
+
+## 14.3 How file system uses disk
+* **sector**：磁盘驱动可以读写的最小单元，它过去通常是512字节。
+
+* **block**：操作系统或者文件系统视角的数据。它由文件系统定义，在XV6中它是1024字节。所以XV6中一个block对应两个sector。通常来说一个block对应了一个或者多个sector。
+
+* 存储设备连接到了**电脑总线**之上，总线也连接了CPU和内存。一个文件系统运行在CPU上，将内部的数据存储在内存，同时也会以读写block的形式存储在SSD或者HDD。
+
+***
+Q: 对于read/write的接口，是不是提供了同步/异步的选项？
+A: 你可以认为一个磁盘的驱动与console的驱动是基本一样的。驱动向设备发送一个命令表明开始读或者写，过了一会当设备完成了操作，会产生一个中断表明完成了相应的命令。但是因为磁盘本身比console复杂的多，所以磁盘的驱动也会比我们之前看过的console的驱动复杂的多。不过驱动中的代码结构还是类似的，也有bottom部分和top部分，中断和读写控制寄存器（注，详见[lec09](#93-设备驱动概述)）。
+***
+
+* 从文件系统的角度，可以将磁盘看作是一个巨大的block数组，从0开始
+![](./image/MIT6.S081/disk_layout.png)
+
+* block0要么没有用，要么被用作**boot sector**来启动操作系统。
+* block1通常被称为**super block**，它描述了文件系统。它可能包含磁盘上有多少个block共同构成了文件系统这样的信息。XV6在里面会存更多的信息，可以通过block1构造出大部分的文件系统信息。
+* 在XV6中，**log**从block2开始，到block32结束。实际上log的大小可能不同，这里在super block中会定义log就是30个block。
+* 在block32到block45之间，XV6存储了**inode**。多个inode会打包存在一个block中，一个inode是64字节。
+* **bitmap block**是构建文件系统的默认方法，它只占据一个block。它记录了数据block是否空闲。
+* 之后的**数据block**存储了文件的内容和目录的内容。
+***
+* QEMU中有个标志位-kernel，它指向了内核的镜像文件，QEMU会将这个镜像的内容加载到了物理内存的0x80000000。所以当我们使用QEMU时，我们不需要考虑boot sector。
+* 假设inode是64字节，如果想要读取inode10，那么应该按照下面的公式去对应的block读取inode：
+$32 + (inodes×64) / 1024$
+
+## 14.4 inode
+**磁盘上的inode结构（64字节）：**
+* **tyoe**字段：表明inode是文件还是目录
+* **nlink**字段：link 计数器，跟踪有多少文件名指向当前的inode
+* **size**字段：文件数据字节数
+* XV6的inode中总共有12个block编号。这些被称为**direct block number**。这12个block编号指向了构成文件的前12个block。举个例子，如果文件只有2个字节，那么只会有一个block编号0，它包含的数字是磁盘上文件前2个字节的block的位置。
+* **indirect block number**对应了磁盘上一个block，这个block包含了256个block number，这256个block number包含了文件的数据。所以inode中block number 0到block number 11都是direct block number，而block number 12保存的indirect block number指向了另一个block。
+
+因此xv6中文件最大的长度是$268×1024$字节 = **268kB**
+
+* 可以用类似page table的方式，构建一个双重indirect block number指向一个block，这个block中再包含了256个indirect block number，每一个又指向了包含256个block number的block。这样的话，最大的文件长度会大得多（注，是256*256*1K）。
+
+* XV6中每一个目录包含了directory entries,每一条entry（**16字节**）有固定的格式
+    1. 前2个字节包含了目录中文件或者子目录的inode编号，
+    1. 接下来的14个字节包含了文件或者子目录名。
+
+    |num|filename|
+    |---|--------|
+    |2|14|
+
+## 14.5 File system工作示例
+代码演示XV6文件系统如何工作
+* 查看```mkae qemu```时xv6的启动过程：
+    ![](./image/MIT6.S081/boot_mkfs.png)
+    可以看到启动时调用了```mkaefs```指令来创建文件系统。下面可以看到有46个meta block, 之后是954个data block，这说明一共只有1000个block。
+
+## 14.6 XV6创建inode代码展示
+* 查看***sysfile.c***,其中包含了所有与文件系统有关的函数。分配 inode发生在```sys_open```函数中，它复制创建文件
+    ```c
+    uint64
+    sys_open(void)
+    {
+      char path[MAXPATH];
+      int fd, omode;
+      struct file *f;
+      struct inode *ip;
+      int n;
+
+      argint(1, &omode);
+      if((n = argstr(0, path, MAXPATH)) < 0)
+        return -1;
+
+      begin_op();
+
+      if(omode & O_CREATE){
+        ip = create(path, T_FILE, 0, 0);    // here
+        if(ip == 0){
+          end_op();
+          return -1;
+        }
+        //...
+    ```
+    可以看到它调用了```create```函数:
+    ```c
+    static struct inode*
+    create(char *path, short type, short major, short minor)
+    {
+      struct inode *ip, *dp;
+      char name[DIRSIZ];
+
+      // 获取路径的父目录inode到dp,同时将最后一部分路径存入name
+      if((dp = nameiparent(path, name)) == 0)
+        return 0;
+
+      ilock(dp);
+
+      // 查看文件是否存在
+      if((ip = dirlookup(dp, name, 0)) != 0){
+        iunlockput(dp);
+        ilock(ip);
+        if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
+          return ip;
+        iunlockput(ip);
+        return 0;
+      }
+
+      // 为文件分配inode
+      if((ip = ialloc(dp->dev, type)) == 0){
+        iunlockput(dp);
+        return 0;
+      }
+
+      ilock(ip);
+      //...
+      return 0;
+    }
+    ``` 
+* 查看用于 分配inode的```ialloc```函数，位于***fs.c***中  ：
+    ```c
+    // Allocate an inode on device dev.
+    // Mark it as allocated by  giving it type type.
+    // Returns an unlocked but allocated and referenced inode,
+    // or NULL if there is no free inode.
+    struct inode*
+    ialloc(uint dev, short type)
+    {
+      int inum;
+      struct buf *bp;
+      struct dinode *dip;
+
+      for(inum = 1; inum < sb.ninodes; inum++){
+         // 从设备dev读取包含inode编号inum的数据块到内存缓冲区bp中 
+        bp = bread(dev, IBLOCK(inum, sb)); 
+        dip = (struct dinode*)bp->data + inum%IPB;
+        if(dip->type == 0){  // a free inode
+          memset(dip, 0, sizeof(*dip));
+          dip->type = type;
+          log_write(bp);   // mark it allocated on the disk
+          brelse(bp);
+          return iget(dev, inum);
+        }
+        brelse(bp);
+      }
+      printf("ialloc: no inodes\n");
+      return 0;
+    }
+    ```
+* ```braed```函数会调用```bdget```函数:
+    ```c
+    // part of bio.c
+    // Look through buffer cache for block on device dev.
+    // If not found, allocate a buffer.
+    // In either case, return locked buffer.
+    static struct buf*
+    bget(uint dev, uint blockno)
+    {
+      struct buf *b;
+
+      acquire(&bcache.lock);
+
+      // Is the block already cached?
+      for(b = bcache.head.next; b != &bcache.head; b = b->next){
+        if(b->dev == dev && b->blockno == blockno){
+          b->refcnt++;
+          release(&bcache.lock);
+          acquiresleep(&b->lock);
+          return b;
+        }
+      }
+
+      // Not cached.
+      // Recycle the least recently used (LRU) unused buffer.
+      for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+        if(b->refcnt == 0) {
+          b->dev = dev;
+          b->blockno = blockno;
+          b->valid = 0;
+          b->refcnt = 1;
+          release(&bcache.lock);
+          acquiresleep(&b->lock);
+          return b;
+        }
+      }
+      panic("bget: no buffers");
+    }
+    ```
+    它会遍历linked-list,来看现有的cache是否 符合要找的block。
+* ```bcache```锁的作用： 如果有多个进程同时调用```bget```的话，其中一个可以获取```bcache```的锁并扫描buffer cache。此时，其他进程是没有办法修改buffer cache的（注，因为bacche的锁被占住了）
+* ```sleep```锁的作用: 获取block 33 cache的锁。其中一个进程获取锁之后函数返回。在ialloc函数中会扫描block 33中是否有一个空闲的inode。而另一个进程会在acquiresleep中等待第一个进程释放锁。
+
+***
+Q：当一个block cache的refcnt不为0时，可以更新block cache吗？因为释放锁之后，可能会修改block cache。
+
+A：这里我想说几点；首先XV6中对bcache做任何修改的话，都必须持有bcache的锁；其次对block 33的cache做任何修改你需要持有block 33的sleep lock。所以在任何时候，release(&bcache.lock)之后，b->refcnt都大于0。block的cache只会在refcnt为0的时候才会被驱逐，任何时候refcnt大于0都不会驱逐block cache。所以当b->refcnt大于0的时候，block cache本身不会被buffer cache修改。这里的第二个锁，也就是block cache的sleep lock，是用来保护block cache的内容的。它确保了任何时候只有一个进程可以读写block cache。
+***
+
+## 14.7 Sleep Lock
+* ```sleep  lock```区别于一个常规的spinlock, 查看代码：
+    ```c
+    void
+    acquiresleep(struct sleeplock *lk)
+    {
+      acquire(&lk->lk);
+      while (lk->locked) {
+        sleep(lk, &lk->lk);
+      }
+      lk->locked = 1;
+      lk->pid = myproc()->pid;
+      release(&lk->lk);
+    }
+    ```
+    函数里首先获取了一个普通的spinlock，这是与sleep lock关联在一起的一个锁。之后，如果sleep lock被持有，那么就进入sleep状态，并将自己从当前CPU调度开。
+* 对于block cache,使用sleep lock 而不是 spin lock的原因：
+    1. 对于spinlock有很多限制，其中之一是加锁时中断必须要关闭。所以如果使用spinlock的话，当我们对block cache做操作的时候需要持有锁，那么对于单CPU核，我们就永远也不能从磁盘收到数据。
+    1. 不能在持有spinlock的时候进入sleep状态（注，详见13.1）。所以这里我们使用sleep lock。
+  使用sleep lock的**优势**： 我们可以在持有锁的时候不关闭中断。我们可以在磁盘操作的过程中持有锁，我们也可以长时间持有锁。当我们在等待sleep lock的时候，我们通过sleep将CPU出让出去了。
+* 查看```brelse```函数：
+    ```c
+    // bio.c
+    // Release a locked buffer.
+    // Move to the head of the most-recently-used list.
+    void
+    brelse(struct buf *b)
+    {
+      if(!holdingsleep(&b->lock))
+        panic("brelse");
+
+      releasesleep(&b->lock);
+
+      acquire(&bcache.lock);
+      b->refcnt--;  // 减少了block cache的引用计数，表明一个进程不再对block cache感兴趣
+      if (b->refcnt == 0) {
+        // no one is waiting for it.
+        //  将block cache移到linked-list的头部，这样表示这个block cache是最近使用过的block cache
+        b->next->prev = b->prev;
+        b->prev->next = b->next;
+        b->next = bcache.head.next;
+        b->prev = &bcache.head;
+        bcache.head.next->prev = b;
+        bcache.head.next = b;
+      }
+      
+      release(&bcache.lock);
+    }
+    ```
+* 当我们在```bget```函数中不能找到block cache时，我们需要在buffer cache中腾出空间来存放新的block cache，这时会使用**LRU（Least Recent Used）**算法找出最不常使用的block cache，并撤回它（注，而将刚刚使用过的block cache放在linked-list的头部就可以直接更新linked-list的tail来完成LRU操作）。
+* 关于```brelse```函数需要注意的 ：
+    * 在内存中，对于一个block只能有一份缓存。这是block cache必须维护的特性。
+    * 这里使用了与之前的spinlock略微不同的sleep lock。与spinlock不同的是，可以在I/O操作的过程中持有sleep lock。
+    * 它采用了LRU作为cache替换策略。
+    * 它有两层锁。第一层锁用来保护buffer cache的内部数据；第二层锁也就是sleep lock用来保护单个block的cache。
+
+***
+Q：我有个关于brelease函数的问题，看起来它先释放了block cache的锁，然后再对引用计数refcnt减一，为什么可以这样呢？
+
+A：这是个好问题。如果我们释放了sleep lock，这时另一个进程正在等待锁，那么refcnt必然大于1，而b->refcnt --只是表明当前执行brelease的进程不再关心block cache。如果还有其他进程正在等待锁，那么refcnt必然不等于0，我们也必然不会执行if(b->refcnt == 0)中的代码。
+***
