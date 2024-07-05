@@ -7192,6 +7192,7 @@ A: 你可以认为一个磁盘的驱动与console的驱动是基本一样的。�
 
 * block0要么没有用，要么被用作**boot sector**来启动操作系统。
 * block1通常被称为**super block**，它描述了文件系统。它可能包含磁盘上有多少个block共同构成了文件系统这样的信息。XV6在里面会存更多的信息，可以通过block1构造出大部分的文件系统信息。
+<a id="30blocks"></a>
 * 在XV6中，**log**从block2开始，到block32结束。实际上log的大小可能不同，这里在super block中会定义log就是30个block。
 * 在block32到block45之间，XV6存储了**inode**。多个inode会打包存在一个block中，一个inode是64字节。
 * **bitmap block**是构建文件系统的默认方法，它只占据一个block。它记录了数据block是否空闲。
@@ -7905,7 +7906,7 @@ bunpin(struct buf *b) {
     之前做的死锁检查```if(!holding(&bcache.buckets[i].lock))```能够防止同一个线程尝试获取已经被持有的锁，但是在**并发状态下**，可能会出现这样一种情况：
     线程1中，桶a持有自己的锁，申请桶b的锁；
     线程2中，桶b持有自己的锁，申请桶a的锁。
-    这就导致了之前课上讲到的[deadly embrace](#deadlyembrace)的情况。通常的解决办法是对所有锁排序，获取时严格按照顺序获取。这里摘录一段书中的话：
+    这就导致了之前课上讲到的[deadly embrace](#deadlyembrace)的情况。通常的解决办法是**对所有锁排序，获取时严格按照顺序获取**。这里摘录一段书中的话：
     ***
     Honoring a global deadlock-avoiding order can be surprisingly difficult. Sometimes the lock order conflicts with logical program structure, e.g., perhaps code module M1 calls module M2, but the lock order requires that a lock in M2 be acquired before a lock in M1. **Sometimes the identities of locks aren’t known in advance, perhaps because one lock must be held in order to discover the identity of the lock to be acquired next.** This kind of situation arises in the file system as it looks up successive components in a path name, and in the code for ```wait``` and ```exit``` as they search the table of processes looking for child processes. Finally, the danger of deadlock is often a constraint on how fine-grained one can make a locking scheme, since more locks often means more opportunity for deadlock. The need to avoid deadlock is often a major factor in kernel implementation.
     ***
@@ -7925,3 +7926,262 @@ bunpin(struct buf *b) {
 
 **usertest测试**：
 ![](./image/MIT6.S081/lock_usertests.png)
+
+# Lec15 Crash recovery
+**预习内容：**
+* 书第八章 logging部分
+* ***kernel/log.c***
+
+## 15.1 File system crash概述
+* 本课研究的Crash/故障种类：文件系统操作过程中的**电力故障**；文件系统操作过程中的**内核panic**。
+  1. 很多文件系统的操作都包含了多个步骤，如果我们在多个步骤的错误位置crash或者电力故障了，存储在磁盘上的文件系统可能会是一种不一致的状态
+  2. 包括XV6在内的大部分内核都会panic，panic可能是由内核bug引起，它会突然导致你的系统故障。
+* 上节课中，创建文件的大概步骤：
+  1. 分配inode, 或者在磁盘上将inode标记为已分配
+  1. 更新包含了新文件的目录的data lock
+  在这两个步骤之间，操作系统crash, 可能会使得文件系统的属性（block的分配状态）被破坏。这样在重启时可能会导致再次crash或者数据丢失/覆写
+
+## 15.2 File system crash示例
+* 假设在下图中的位置出现电力故障：
+    ![](./image/MIT6.S081/crashexample.png)
+    block33的inode初始化并被标记为已分配，但是它并没有被放到任何目录中，我们没有办法去删除它。
+  如果修改一下顺序, 尝试先写block 46来更新目录内容，之后再写block 32来更新目录的size字段，最后再将block 33中的inode标记为已被分配。
+    ```
+    write:46 record x in / directory's data block
+    write:32 update root inode
+    // power off here
+    write:33 allocate inode for x
+    write:33 init inode x
+    write:33 update inode x
+    ```
+    如果在标记位置发生了电力故障，目录被更新，但是磁盘上没有分配inode。这样会导致读取一个未被分配的inode，如果inode之后被分配给一个不同的文件，这样会导致有两个应该完全不同的文件共享了同一个inode。如果这两个文件分别属于用户1和用户2，那么用户1就可以读到用户2的文件了。
+
+* 因此，多个写磁盘的操作必须作为一个**原子操作**出现在磁盘上。
+
+## 15.3 File system logging
+* **logging**是来自数据库的一种解决方案，它的优点：
+  1. 可以确保文件系统的系统调用是**原子性**的。
+  1. 支持**快速恢复（Fast Recovery）**， 重启之后只需要非常小的工作量快速恢复属性。
+  1. 它可以非常的高效（在xv6中的实现太过简单因此不是很高效）。
+![](./image/MIT6.S081/disk_layout.png)
+* logging的**基本思想**：首先将磁盘分割成log和文件系统，后者比前者大得多.
+  1. **log write**: 当需要更新文件系统时，我们并不是更新文件系统本身，而总是先**将写操作写入到log中**。
+  1. **commit op**: 之后在某个时间，当文件系统的操作结束了，我们会commit文件系统的操作。这意味着我们需要在log的某个位置记录属于同一个文件系统的操作的个数。
+  1. **install log**: 当我们在log中存储了所有写block的内容时，如果我们要真正执行这些操作，只需要将block从log分区移到文件系统分区。
+  1. **clean log**: 一旦完成了，就可以清除log。实际上就是将属于同一个文件系统的操作的个数设置为0。
+* 这样一来，在crash并重启时，文件系统会查看log的commit记录值，如果是0的话，那么什么也不做。如果大于0的话，我们就知道log中存储的block需要被写入到文件系统中，很明显我们在crash的时候并不一定完成了install log，我们可能是在commit之后，clean log之前crash的。所以这个时候我们需要做的就是reinstall（注，也就是将log中的block再次写入到文件系统），再clean log。
+
+推演一下Crash的几种情况：
+1. 在i., ii.步之间：在重启的时候什么也不会做，就像系统调用从没有发生过一样，也像crash是在文件系统调用之前发生的一样。
+1. 在ii., iii.步之间：在这个时间点，所有的log block都落盘了，因为有commit记录，所以完整的文件系统操作必然已经完成了。我们可以将log block写入到文件系统中相应的位置，这样也不会破坏文件系统。所以这种情况就像系统调用正好在crash之前就完成了。
+1. 在iii., iv.步之间：在下次重启的时候，我们会redo log，我们或许会再次将log block中的数据再次拷贝到文件系统。这样也是没问题的，因为log中的数据是固定的，我们就算重复写了文件系统，每次写入的数据也是不变的。重复写入并没有任何坏处，因为我们写入的数据可能本来就在文件系统中，所以多次install log完全没问题。*当然在这个时间点，我们不能执行任何文件系统的系统调用。我们应该在重启文件系统之前，在重启或者恢复的过程中完成这里的恢复操作。*
+
+***
+Q: 当正在commit log的时候crash了会发生什么？比如说你想执行多个写操作，但是只commit了一半。
+
+A: 在上面的第2步，执行commit操作时，你只会在记录了所有的write操作之后，才会执行commit操作。所以在执行commit时，所有的write操作必然都在log中。而commit操作本身也有个有趣的问题，它究竟会发生什么？如我在前面指出的，commit操作本身只会写一个block。文件系统通常可以这么假设，单个block或者单个sector的write是原子操作（注，有关block和sector的区别详见14.3）。这里的意思是，如果你执行写操作，要么整个sector都会被写入，要么sector完全不会被修改。所以sector本身永远也不会被部分写入，并且commit的目标sector总是包含了有效的数据。而commit操作本身只是写log的header，如果它成功了只是在commit header中写入log的长度，例如5，这样我们就知道log的长度为5。这时crash并重启，我们就知道需要重新install 5个block的log。如果commit header没能成功写入磁盘，那这里的数值会是0。我们会认为这一次事务并没有发生过。这里本质上是**write ahead rule**，它表示logging系统在所有的写操作都记录在log中之前，不能install log。
+***
+* **write ahead rule**: 需要先将所有的block写入到log中，之后才能实际的更新文件系统block。所以buffer cache不能撤回任何还位于log的block。
+
+* xv6中log的结构：
+![](./image/MIT6.S081/logging.png)
+当文件系统在运行时，在内存中也有header block的一份拷贝，拷贝中也包含了n和block编号的数组。这里的block编号数组就是log数据对应的实际block编号，并且相应的block也会缓存在block cache中.
+
+## 15.4 log_write函数
+* 以***sysfile.c***中的```sys_open```为例，每个文件系统操作，都有```begin_op```和```end_op```分别表示事物的开始和结束。
+    ```c
+    uint64
+    sys_open(void)
+    {
+      char path[MAXPATH];
+      int fd, omode;
+      struct file *f;
+      struct inode *ip;
+      int n;
+
+      argint(1, &omode);
+      if((n = argstr(0, path, MAXPATH)) < 0)
+        return -1;
+
+      begin_op();
+
+      if(omode & O_CREATE){
+        ip = create(path, T_FILE, 0, 0);  // here
+        if(ip == 0){
+          end_op();
+          return -1;
+        }
+      } else {
+        if((ip = namei(path)) == 0){
+          end_op();
+          return -1;
+        }
+        ilock(ip);
+        if(ip->type == T_DIR && omode != O_RDONLY){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+      }
+      //...
+    } 
+    ```
+    事务中的所有写block操作具备**原子性**，在```begin_op```和```end_op```之间，磁盘或内存上的数据结构会更新。但是在```end_op```之前都不会写入到实际的block中。在```end_op```中会将数据写入到log中，之后再写入commit record或者log header。
+* 查看***fs.c***中的```ialloc```，文件系统调用执行写磁盘时发生的事情，它在```create```中被调用：
+    ```c
+    // Allocate an inode on device dev.
+    // Mark it as allocated by  giving it type type.
+    // Returns an unlocked but allocated and referenced inode,
+    // or NULL if there is no free inode.
+    struct inode*
+    ialloc(uint dev, short type)
+    {
+      int inum;
+      struct buf *bp;
+      struct dinode *dip;
+
+      for(inum = 1; inum < sb.ninodes; inum++){
+        bp = bread(dev, IBLOCK(inum, sb));
+        dip = (struct dinode*)bp->data + inum%IPB;
+        if(dip->type == 0){  // a free inode
+          memset(dip, 0, sizeof(*dip));
+          dip->type = type;
+          log_write(bp);   // mark it allocated on the disk
+          brelse(bp);
+          return iget(dev, inum);
+        }
+        brelse(bp);
+      }
+      printf("ialloc: no inodes\n");
+      return 0;
+    }
+    ```
+    这里调用了文件系统logginng实现的函数```log_write```而不是```bwrite```。其实现如下：
+    ```c
+    // Caller has modified b->data and is done with the buffer.
+    // Record the block number and pin in the cache by increasing refcnt.
+    // commit()/write_log() will do the disk write.
+    //
+    // log_write() replaces bwrite(); a typical use is:
+    //   bp = bread(...)
+    //   modify bp->data[]
+    //   log_write(bp)
+    //   brelse(bp)
+    void
+    log_write(struct buf *b)
+    {
+      int i;
+
+      acquire(&log.lock);
+      if (log.lh.n >= LOGSIZE || log.lh.n >= log.size - 1)
+        panic("too big a transaction");
+      if (log.outstanding < 1)
+        panic("log_write outside of trans");
+
+      for (i = 0; i < log.lh.n; i++) {  // 查看block是否已经被log记录了
+        if (log.lh.block[i] == b->blockno)   // log absorption
+          break;
+      }
+      log.lh.block[i] = b->blockno;
+      if (i == log.lh.n) {  // Add new block to log?
+        bpin(b);
+        log.lh.n++;
+      }
+      release(&log.lock);
+    }
+    ```
+    我们已经向block cache中的某个block写入了数据。比如写block 45，我们已经更新了block cache中的block 45。接下来我们需要在内存中记录，在稍后的commit中，要将block 45写入到磁盘的log中。
+    这里的代码先获取log header的锁，之后再更新log header。首先代码会查看block 45是否已经被log记录了。如果是的话，其实不用做任何事情，因为block 45已经会被写入了。这种忽略的行为称为**log absorbtion**。如果block 45不在需要写入到磁盘中的block列表中，接下来会对n加1，并将block 45记录在列表的最后。之后，这里会通过调用```bpin```函数将block 45固定在block cache中，我们稍后会介绍为什么要这么做（注，详见15.8）。
+    
+## 15.5 end_op函数
+* 查看```end_op```函数：
+    ```c
+    // called at the end of each FS system call.
+    // commits if this was the last outstanding operation.
+    void
+    end_op(void)
+    {
+      int do_commit = 0;
+
+      acquire(&log.lock);
+      log.outstanding -= 1;
+      if(log.committing)
+        panic("log.committing");
+      if(log.outstanding == 0){
+        do_commit = 1;
+        log.committing = 1;
+      } else {
+        // begin_op() may be waiting for log space,
+        // and decrementing log.outstanding has decreased
+        // the amount of reserved space.
+        wakeup(&log);
+      }
+      release(&log.lock);
+
+      if(do_commit){
+        // call commit w/o holding locks, since not allowed
+        // to sleep with locks.
+        commit();
+        acquire(&log.lock);
+        log.committing = 0;
+        wakeup(&log);
+        release(&log.lock);
+      }
+    }
+    ```
+    前面是一些复制情况的处理，之后会讲解。在简单情况下，首先调用```commit()```函数:
+    ```c
+    static void
+    commit()
+    {
+      if (log.lh.n > 0) {
+        write_log();     // Write modified blocks from cache to log
+        write_head();    // Write header to disk -- the real commit
+        install_trans(0); // Now install writes to home locations
+        log.lh.n = 0;
+        write_head();    // Erase the transaction from the log
+      }
+    }
+    ```
+    ```wirte_log```依次遍历log中记录的block，并写入到log中。
+    ```write_head```将内存中的log header写入到磁盘中，其中的```bwrite(buf);```是关键的数据落盘点，也就是实际的commot point。在commit point之前，**事务（transaction）**并没有发生，在commit point之后，只要恢复程序正确运行，transaction必然可以完成。
+    ```install_trans```会实际应用transaction，读取log block再查看header这个block属于文件系统中的哪个block，最后再将log block写入到文件系统相应的位置。
+    install结束之后，会将log header中的n设置为0，再将log header写回到磁盘中。将n设置为0的效果就是清除log。
+
+## 15.6 File system recovering
+* 当系统crash并重启了，在XV6启动过程中做的一件事情就是调用```initlog```函数, 它基本上就是调用```recover_from_log```函数：
+    ```c
+    static void
+    recover_from_log(void)
+    {
+      read_head();  // 从磁盘中读取header
+      install_trans(1); // if committed, copy from log to disk
+      log.lh.n = 0;
+      write_head(); // clear the log
+    }
+    ```
+    ```install_trans```函数之前在```commit```函数中也调用过，它就是读取log header中的n，然后根据n将所有的log block拷贝到文件系统的block中。
+    之后也和```commit```函数一样清除log。
+* 如果我们在```install_trans```函数中又crash了，也不会有问题，因为之后再重启时，XV6会再次调用```initlog```函数，再调用```recover_from_log```来重新install log。如果我们在commit之前crash了多次，在最终成功commit时，log可能会install多次。
+
+## 15.8 File system challenges
+* **cache eviction**: 假设transaction还在进行中，我们刚刚更新了block 45，正要更新下一个block，而整个buffer cache都满了并且决定撤回block 45。在buffer cache中撤回block 45意味着我们需要将其写入到磁盘的block 45位置，**如果将block 45写入到磁盘之后发生了crash**, 就会破坏transaction的原子性。这里也破坏了前面说过的**write ahead rule**.
+* ```bpin```可以将block固定在buffer cache中，它通过给block cache增加引用计数来避免cache撤回对应的block（因为引用计数不为0时buffer cache不会撤回block cache）。
+
+* **文件系统操作必须适配log的大小**：在XV6中，总共有30个log block（注，详见[14.3](#30blocks)）。当然我们可以提升log的尺寸，在真实的文件系统中会有大得多的log空间。但是不管log多大，文件系统操作必须能放在log空间中。如果一个文件系统操作尝试写入超过30个block，那么意味着部分内容需要直接写到文件系统区域，而这是不被允许的，因为这违背了write ahead rule。所以所有的文件系统操作都必须适配log的大小。
+* XV6会将一个大的写操作分割成多个小的写操作，每一个小的写操作通过独立的transaction写入。这样文件系统本身不会陷入不正确的状态中。
+* 因为block在落盘之前需要在cache中pin住，所以buffer cache的尺寸也要大于log的尺寸。
+* **并发文件系统调用**: 假设我们有一段log，和两个并发的执行的transaction，其中transaction t0在log的前半段记录，transaction t1在log的后半段记录。可能我们用完了log空间，但是任何一个transaction都还没完成。
+所以当我们还没有完成一个文件系统操作时，我们必须在确保**可能写入的总的log数小于log区域的大小**的前提下，才**允许另一个文件系统操作开始**。
+* XV6通过**限制并发文件系统操作的个数**来实现这一点。在begin_op中，我们会检查当前有多少个文件系统操作正在进行(```outstanding```字段)。如果有太多正在进行的文件系统操作（超过```MAXOPBLOCKS```），我们会通过```sleep```停止当前文件系统操作的运行，并等待所有其他所有的文件系统操作都执行完并commit之后再唤醒。这里的其他所有文件系统操作都会一起commit。有的时候这被称为**group commit**，因为这里将多个操作像一个大的transaction一样提交了，这里的多个操作要么全部发生了，要么全部没有发生。
+***
+Q：group commit有必要吗？不能当一个文件系统操作结束的时候就commit掉，然后再commit其他的操作吗？
+
+A：如果这样的话你需要非常非常小心。因为有一点我没有说得很清楚，我们需要保证write系统调用的顺序。如果一个read看到了一个write，再执行了一次write，那么第二个write必须要发生在第一个write之后。在log中的顺序，本身就反应了write系统调用的顺序，你不能改变log中write系统调用的执行顺序，因为这可能会导致对用户程序可见的奇怪的行为。所以必须以transaction发生的顺序commit它们，而一次性提交所有的操作总是比较安全的，这可以保证文件系统处于一个好的状态。
+***
+* 在```begin_op```中，只要log空间还足够，就可以一直增加并发执行的文件系统操作。所以XV6是通过设定了```MAXOPBLOCKS```，再间接的限定支持的并发文件系统操作的个数。
+***
+Q：前面说到cache size至少要跟log size一样大，如果它们一样大的话，并且log pin了30个block，其他操作就不能再进行了，因为buffer中没有额外的空间了。
+
+A：如果buffer cache中没有空间了，XV6会直接panic。这并不理想，实际上有点恐怖。所以我们在挑选buffer cache size的时候希望用一个不太可能导致这里问题的数字。这里为什么不能直接返回错误，而是要panic？因为很多文件系统操作都是多个步骤的操作，假设我们执行了两个write操作，但是第三个write操作找不到可用的cache空间，那么第三个操作无法完成，我们不能就直接返回错误，因为我们可能已经更新了一个目录的某个部分，为了保证文件系统的正确性，我们需要撤回之前的更新。所以如果log pin了30个block，并且buffer cache没有额外的空间了，会直接panic。当然这种情况不太会发生，只有一些极端情况才会发生。
+***
