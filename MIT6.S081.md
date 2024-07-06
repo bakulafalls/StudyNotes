@@ -7434,8 +7434,8 @@ A：这是个好问题。如果我们释放了sleep lock，这时另一个进程
 在本实验中，您将获得重新设计代码以提**高并行性**的经验。多核机器上并行性差的一个常见症状是频繁的锁争用。提高并行性通常涉及**更改数据结构**和**锁定策略以减少争用**。您将对xv6内存分配器和块缓存执行此操作。
 本实验分支：
 ```sh
-$ git lock
-$ git checkout thread
+$ git fetch
+$ git checkout lock
 $ make clean
 ```
 ## Task1 Memory allocator
@@ -8189,8 +8189,8 @@ A：如果buffer cache中没有空间了，XV6会直接panic。这并不理想�
 # Lab9 File system
 本实验分支：
 ```sh
-$ git fs
-$ git checkout thread
+$ git fetch
+$ git checkout fs
 $ make clean
 ```
 
@@ -8580,3 +8580,113 @@ sys_open(void)
 # Lec16 File system performance and fast crash recovery
 **预习内容：**
 [Journaling the Linux ext2fs Filesystem](https://pdos.csail.mit.edu/6.828/2020/readings/journal-design.pdf)
+
+论文要解决的问题是**恢复崩溃文件系统内容的可靠性**，包括以下几个方面：
+1. **保持（Preservation）**：崩溃前磁盘上稳定的数据永远不会被损坏。显然，崩溃时正在写入的文件不能保证完全完好无损，但是恢复系统不能碰磁盘上已经安全的任何文件。
+
+1. **可预测性（Predictability）**：我们必须恢复的故障模式应该是可预测的，以便我们可靠地恢复。
+
+1. **原子性（Atomicity）**：许多文件系统操作需要大量独立的IO来完成。一个很好的例子是将文件从一个目录重命名到另一个目录。如果这样的文件系统操作在磁盘上完全完成，或者在恢复完成后完全撤销，恢复就是原子性的。（对于重命名的例子，恢复应该在崩溃后保留提交给磁盘的旧文件名或新文件名，但不能两者都保留。）
+
+文章提出了给ext2中添加一个新的特性————**事务性文件系统日志记录**，得到ext3文件系统。
+ext3就是在几乎不改变之前的ext2文件系统的前提下，在其上增加一层logging系统。
+
+## 16.1 Why logging
+* logging可以用在任何一个已知的存储系统的故障恢复流程中，它在很多地方都与你想存储的任何数据相关。所以你们可以在大量的存储场景中看到log，比如说**数据库**，**文件系统**，甚至一些**需要在crash之后恢复的定制化的系统**中。
+
+## 16.2 XV6 File system logging回顾
+* 在```begin_op```和```end_op```之间，所有的write block操作只会走到block cache中。当系统调用走到了```end_op```函数，文件系统会将修改过的block cache拷贝到log中。
+* 在拷贝完成之后，文件系统会将修改过的block数量，通过一个磁盘写操作写入到log的header block，这次写入被称为commit point。
+* 包括XV6在内的所有logging系统，都需要遵守**write ahead rule**。这里的意思是，任何时候如果一堆写操作需要具备原子性，系统需要先将所有的写操作记录在log中，之后才能将这些写操作应用到文件系统的实际位置。也就是说，我们需要预先在log中定义好所有需要具备原子性的更新，之后才能应用这些更新。write ahead rule是logging能实现故障恢复的基础。write ahead rule使得一系列的更新在面对crash时具备了原子性。
+* XV6对于不同的系统调用复用的是同一段log空间，但是直到log中所有的写操作被更新到文件系统之前，我们都不能释放或者重用log。我将这个规则称为**freeing rule**，它表明我们不能覆盖或者重用log空间，直到保存了transaction所有更新的这段log，都已经反应在了文件系统中。(在从log中删除一个transaction之前，我们必须将所有log中的所有block都写到文件系统中。)
+* xv6中的```end_op```会做大量工作，包括：
+    1. 将所有更新了的block写入到log
+    1. 更新header block
+    1. 将log中的所有block写回到文件系统分区中
+    1. 清除header block
+    XV6的系统调用对于写磁盘操作来说是同步的（synchronized），所以它非常非常的慢。并且，在XV6的logging方案中，每个block都被写了两次。第一次写入到了log，第二次才写入到实际的位置。
+
+## 16.3 ext3 file system log format
+* ext3的数据结构与XV6是类似的。在内存中，存在block cache，这是一种write-back cache（注，区别于write-through cache，指的是cache稍后才会同步到真正的后端）。block cache中缓存了一些block，其中的一些是干净的数据，因为它们与磁盘上的数据是一致的；其他一些是脏数据，因为从磁盘读出来之后被修改过；有一些被固定在cache中，基于前面介绍的write-ahead rule和freeing rule，不被允许写回到磁盘中。
+
+* ext3可以维护多个在不同阶段的transaction信息。每个transaction的信息包含有
+  1. 一个序列号
+  1. 一系列该transaction修改的block编号。这些block编号指向的是在cache中的block,因为任何修改最初都是在cache中完成
+  1. 一系列的handle, handle对应了系统调用，并且这些系统调用是transaction的一部分，会读写cache中的block
+* ext3在磁盘上与xv6一样，包含：
+  1. 一个文件系统树，包含了inode, 目录，文件等
+  1. 会有bitmap block来表明每个data block是被分配的还是空闲的
+  1. 在磁盘的一个指定区域，会保存log
+
+* ext3与xv6最主要的区别在于ext3可以**同时跟踪多个在不同执行阶段的transaction**，ext3中的log结构图如下：
+![](./image/MIT6.S081/ext3log.png)
+在crash之后的恢复过程会扫描log，为了将descriptor block和commit block与data block区分开，**descriptor block**和**commit block**会以一个32bit的魔法数字（Magic Number）作为起始。这个魔法数字不太可能出现在数据中，并且可以帮助恢复软件区分不同的block。
+
+***
+Q：有没有可能使用一个descriptor block管理两个transaction？是不是只能一个transaction结束了才能开始下一个transaction？
+
+A：Log中会有多个transaction，但是的确一个时间只有一个正在进行的transaction。上面的图片没能很好的说明这一点，当前正在进行的transaction对应的是正在执行写操作的系统调用。所以当前正在进行的transaction只存在于内存中，对应的系统调用只会更新cache中的block，也就是内存中的文件系统block。当ext3决定结束当前正在进行的transaction，它会做两件事情：首先开始一个新的transaction，这将会是下一个transaction；其次将刚刚完成的transaction写入到磁盘中，这可能要花一点时间。所以完整的故事是，磁盘上的log分区有一系列旧的transaction，这些transaction已经commit了，除此之外，还有一个位于内存的正在进行的transaction。在磁盘上的transaction，只能以log记录的形式存在，并且还没有写到对应的文件系统block中。logging系统在后台会从最早的transaction开始，将transaction中的data block写入到对应的文件系统中。当整个transaction的data block都写完了，之后logging系统才能释放并重用log中的空间。所以**log其实是个循环的数据结构**，如果用到了log的最后，logging系统会从log的最开始位置重新使用。
+***
+
+## 16.4 ext3如何提升性能
+ext3通过3种方式提升性能：
+1. 提供了**异步的(asynchronous)**系统调用。系统调用在写入到磁盘之前就返回了，系统调用只会更新缓存在内存中的block，并不用等待写磁盘操作。不过它可能会等待读磁盘。
+1. 提供了**批量执行(batching)**的能力，可以将多个系统调用打包成一个transaction。
+1. 提供了**并发(concurrency)**。
+
+* **异步**系统调用：系统调用修改完位于缓存中的block之后就返回，并不会触发写磁盘。它可以使得系统调用快速返回，并且可以让**I/O可以并行运行**。应用程序从系统调用中返回的同时，文件系统会在后台并行地完成之前的系统调用所要求的写磁盘的操作。
+* ```fsync```系统调用：接收一个文件描述符作为参数，它会告诉文件系统去完成所有的与该文件相关的写磁盘操作，在所有的数据都确认写入到磁盘之后，```fsync```才会返回。这个系统调用在数据库、文本编辑器等非常关心文件数据的应用程序中有广泛应用。（这种工作方式也被称为
+**flush**）
+
+* **批量执行**：ext3首先会宣告要开始一个新的transaction，接下来的几秒所有的系统调用都是这个大的transaction的一部分。时间结束后ext3会commit这个包含了可能有数百个更新的大transaction。
+* 批量执行的**优点**:
+1. 在多个系统调用之间分摊了transaction带来的损耗（descriptor block, commit block, 机械硬盘中查找log位置时磁碟旋转）
+1. 更容易出发**write absorption**。一堆系统调用可能会反复更新一组相同的磁盘block。通过batching，多次更新同一组block会先快速的在内存的block cache中完成，之后在transaction结束时，一次性的写入磁盘的log中。
+1. **disk scheduling**: 一次性的向磁盘的连续位置写入1000个block，要比分1000次每次写一个不同位置的磁盘block快得多。
+
+* ext3相较于xv6包含了两种**并发**：
+1. **允许多个系统调用同时执行** ： 在ext3决定关闭并commit当前的transaction之前，系统调用不必等待其他的系统调用完成，它可以直接修改作为transaction一部分的block。
+1. **可以有多个不同状态的transaction同时存在。** 所以尽管只有一个open transaction可以接收系统调用，但是其他之前的transaction可以并行的写磁盘。这里可以并行存在的不同transaction状态包括了：
+  1. 首先是一个open transaction
+  1. 若干个正在commit到log的transaction，我们并不需要等待这些transaction结束。当之前的transaction还没有commit并还在写log的过程中，新的系统调用仍然可以在当前的open transaction中进行。
+  1. 若干个正在从cache中向文件系统block写数据的transaction
+  1. 若干个正在被释放的transaction，这个并不占用太多的工作
+
+
+## 16.5 ext3文件系统调用格式
+每个系统调用在调用了表示transaction开始的start函数之后，都会得到一个handle，它唯一识别了当前系统调用.
+```c
+sys_unlink()
+  h = start()
+  get(h, block#)
+  modify blocks in cache
+  stop(h)
+```
+之后系统调用需要读写block，它可以通过get获取block在buffer中的缓存，同时告诉handle这个block需要被读或者被写。如果你需要更改多个block，类似的操作可能会执行多次。之后是修改位于缓存中的block。
+系统调用结束时，调用stop函数，并将handle作为参数传入。
+除非transaction中所有已经开始的系统调用都完成了，transaction是不能commit的。因为可能有多个transaction，文件系统需要有种方式能够记住系统调用属于哪个transaction，这样当系统调用结束时，文件系统就知道这是哪个transaction正在等待的系统调用，所以handle需要作为参数传递给stop函数。
+因为每个transaction都有一堆block与之关联，修改这些block就是transaction的一部分内容，所以我们将handle作为参数传递给get函数是为了告诉logging系统，这个block是handle对应的transaction的一部分。
+stop函数并不会导致transaction的commit，它只是告诉logging系统，当前的transaction少了一个正在进行的系统调用。transaction只能在所有已经开始了的系统调用都执行了stop之后才能commit。所以transaction需要记住所有已经开始了的handle，这样才能在系统调用结束的时候做好记录。
+
+## 16.6 ext3 transaction commit步骤
+每隔5秒，文件系统都会commit当前的open transaction，具体步骤如下：
+1. 首先需要阻止新的系统调用。当我们正在commit一个transaction时，我们不会想要有新增的系统调用，我们只会想要包含已经开始了的系统调用，所以我们需要阻止新的系统调用。这实际上会损害性能，因为在这段时间内系统调用需要等待并且不能执行。
+1. 需要等待包含在transaction中的已经开始了的系统调用们结束。所以我们需要等待transaction中未完成的系统调用完成，这样transaction能够反映所有的写操作。
+1. 一旦transaction中的所有系统调用都完成了，也就是完成了更新cache中的数据，那么就可以开始一个新的transaction，并且让在第一步中等待的系统调用继续执行。所以现在需要为后续的系统调用开始一个新的transaction。
+1. 现在我们知道了transaction中包含的所有的系统调用所修改的block，因为系统调用在调用get函数时都将handle作为参数传入，表明了block对应哪个transaction。接下来我们可以更新descriptor block，其中包含了所有在transaction中被修改了的block编号。
+1. 我们还需要将被修改了的block，从缓存中写入到磁盘的log中。新的transaction可能会修改相同的block，所以在这个阶段，我们写入到磁盘log中的是transaction结束时，对于相关block cache的拷贝。所以这一阶段是将实际的block写入到log中。
+1. 等待前两步中的写log结束.
+1. 写入commit block。
+1. 等待写commit block结束。结束之后，从技术上来说，当前transaction已经到达了commit point，也就是说transaction中的写操作可以保证在面对crash并重启时还是可见的。如果crash发生在写commit block之前，那么transaction中的写操作在crash并重启时会丢失。
+1. 将transaction包含的block写入到文件系统中的实际位置。
+1. 在第9步中的所有写操作完成之后，我们才能重用transaction对应的那部分log空间。
+
+
+# Lab10 mmap
+## Task mmap (hard)
+本实验分支：
+```sh
+$ git fetch
+$ git checkout mmap
+$ make clean
+```
