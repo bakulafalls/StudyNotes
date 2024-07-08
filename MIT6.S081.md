@@ -8681,6 +8681,235 @@ stop函数并不会导致transaction的commit，它只是告诉logging系统，�
 1. 将transaction包含的block写入到文件系统中的实际位置。
 1. 在第9步中的所有写操作完成之后，我们才能重用transaction对应的那部分log空间。
 
+## 16.9 总结
+**需要记住的三点：**
+1. log是为了保证多个步骤的写磁盘操作具备原子性。在发生crash时，要么这些写操作都发生，要么都不发生。这是logging的主要作用。
+
+1. logging的正确性由write ahead rule来保证。你们将会在故障恢复相关的业务中经常看到write ahead rule或者write ahead log（WAL）。write ahead rule的意思是，你必须在做任何实际修改之前，将所有的更新commit到log中。在稍后的恢复过程中完全依赖write ahead rule。对于文件系统来说，logging的意义在于简单的快速恢复。log中可能包含了数百个block，你可以在一秒中之内重新执行这数百个block，不管你的文件系统有多大，之后又能正常使用了。
+
+1. 最后有关ext3的一个细节点是，它使用了批量执行和并发来获得可观的性能提升，不过同时也带来了可观的复杂性的提升。
+
+
+***
+Q：为什么不在descriptor block里面记录commit信息。虽然这样可能不太好，因为要回到之前的一个位置去更新之前的一个block。
+
+A：所以这里的提议是，与其要一个专门的commit block，可以让descriptor block来实现commit block的功能。XV6与这个提议非常像，我认为可以这么做，至少在ext3中这么做了不会牺牲性能。你需要像XV6一样来组织这里的结构，也就是需要在descriptor block包含某个数据表明这是一个已经提交过的transaction。
+这样做的话，可以节省一个commit block的空间，但是不能节省整个时间。Linux文件系统的后续版本实现了你的提议，ext4做了以下工作来更有效的写commit block。**ext4会同时写入所有的data block和commit block**，它并不是等待所有的data block写完了之后才写的commit block。但是这里有个问题，磁盘可以无序的执行写操作，所以磁盘可能会先写commit block之后再写data block。如果中间有了crash，那么我们有了commit block，但是却没有全部的data block。ext4通过在**commit block中增加校验**和来避免这种问题。所以commit block写入之后发生了crash，如果data block没有全写入那么校验和不能得出正确的结果，恢复软件可以据此判断出错了。ext4可以通过这种方式在机械硬盘上写入一批block而避免磁碟旋转，进而提升磁盘性能。
+***
+
+# Lec17 Virtual memory for applications
+**预习内容**：[Virtual Memory Primitives for User Program（1991）](https://pdos.csail.mit.edu/6.828/2020/readings/appel-li.pdf)
+论文的核心观点是：用户应用程序也可以使用与内核相同的机制，产生page fault并响应page fault。
+
+## 17.1 应用程序使用虚拟内存所需要的特性
+1. 需要trap来使得发生在内核中的Page Fault可以传播到用户空间，然后在用户空间的handler可以处理相应的Page Fault，之后再以正常的方式返回到内核并恢复指令的执行。这个特性是必须的，否则的话，不能基于Page Fault做任何事情。*--对应下面的```sigaction```*
+1. **Prot1**，它会降低了一个内存Page的accessability。accessability的意思是指内存Page的读写权限。内存Page的accessability有不同的降低方式，例如，将一个可以读写的Page变成只读的，或者将一个只读的Page变成完全没有权限。*--对应下面的```mprotect```*
+1. 管理多个Page的**ProtN**， ProtN基本上等效于修改PTE的bit位N次，再加上清除一次TLB。如果执行了N次Prot1，那就是N次修改PTE的bit位，再加上清除N次TLB，所以ProtN可以减少清除TLB的次数，进而提升性能。*--对应下面的```mprotect```*
+1. **Unprot**：它增加了内存Page的accessability，例如将本来只读的Page变成可读可写的。*--对应下面的```mprotect```*
+1. 需要能够查看内存Page是否是Dirty。
+1. **map2**：使得一个应用程序可以将一个特定的内存地址空间映射两次，并且这两次映射拥有不同的accessability（注，也就是一段物理内存对应两份虚拟内存，并且两份虚拟内存有不同的accessability）。*--通过多次调用下面的```mmap```来实现*
+在xv6中，用户程序目前只支持类似于trap及其相关的alarm handler。
+
+## 17.2 支持应用程序使用虚拟内存的系统调用
+* ```mmap```系统调用：接收某个对象，并将其映射到调用者的地址空间中。
+    ```c
+    /**
+     * @brief map files or devices into memory
+    * @param addr the address you want map to. 
+                  kernel will choose one if it's null.
+    * @param len the length of fd
+    * @param prot Protrction bit. PROT_NONE/PROT_READ/PROT_WRITE/PROT_EXEC...
+    * @param fd the object you want to map 
+    */
+    void *mmap(void *addr[.len], size_t len, int prot, int flags,
+    int fd, off_t offset) 
+    ```
+    通过上面的系统调用，可以将文件描述符fd指向的文件内容，从起始位置加上offset的地方开始，映射到特定的内存地址（如果指定了的话），并且连续映射len长度。这是一个方便的接口，可以用来操纵存储在文件中的数据结构。
+
+* ```mprotect```系统调用：修改对应虚拟内存的权限。
+    ```c
+    /**
+     * @brief changes the access protections for the calling
+          process's memory pages
+    * @param addr start address, must be aligned to a page boundary
+    * @param len the address range is [addr, addr + len - 1]
+    * @param prot PROT_NONE/PROT_READ/PROT_WRITE/PROT_EXEC...
+    * @return 0 if successful, -1 otherwise
+    */
+    int mprotect(void addr[.len], size_t len, int prot)
+    ```
+    这个指令将addr到addr+len这段地址的权限设为只读后， load指令还能执行，但是store指令会变成page fault。
+
+* ```munmap```系统调用：移除一个地址或者一段内存地址的映射关系
+    ```c
+    /**
+     * @brief remove any mappings for those entire
+              pages containing any part of the address 
+              space of the process starting at ADDR 
+              and continuing for LEN bytes.
+    * @return 0 if successful, -1 otherwise
+    */
+    int munmap(void *addr, size_t len);
+    ```
+
+* ```sigaction```系统调用：使得应用程序可以设置好一旦特定的signal发生了，就调用特定的函数。类似于trap lab中实现的```sigalarm```
+```c
+/**
+ * @brief change the action taken by a process 
+          on receipt of a specific signal.
+ * @param signum specifies the signal and can be 
+                 any valid signal except SIGKILL and SIGSTOP.
+ * @param act the new action for signal signum
+ * @param oldact save the previous action
+ */
+int sigaction(int signum,
+              const struct sigaction *_Nullable restrict act,
+              struct sigaction *_Nullable restrict oldact);
+```
+
+## 17.3 虚拟内存系统如何支持用户应用程序
+***
+**VM implementation**
+* 在现代的Unix系统中，地址空间是由**硬件Page Table**来体现的，在Page Table中包含了地址翻译。
+* **Virtual Memory Areas(VMA)**: 地址空间包含的一些操作系统的数据结构，与硬件设计无关。地址空间中的每一个section(由连续地址段构成)都有一个VMA对象，连续地址段中的所有Page都有相同的权限，并且都对应同一个对象VMA。
+* VMA中会包含文件的权限，以及文件本身的信息，例如文件描述符，文件的offset等。
+
+***
+**User-level traps**
+我们假设一个PTE被标记成invalid或者只读，而你想要向它写入数据。这时，CPU会跳转到kernel中的固定程序地址，也就是XV6中的trampoline代码（详见[6.2](#62-Trap代码执行流程)）。kernel会保存应用程序的状态，在XV6中是保存到trapframe。之后再向虚拟内存系统查询，现在该做什么呢？虚拟内存系统或许会做点什么，例如在lazy lab和copy-on-write lab中，trap handler会查看Page Table数据结构。而在我们的例子中会查看VMA，并查看需要做什么。举个例子，如果是segfault，并且应用程序设置了一个handler来处理它，那么
+
+1. segfault事件会被传播到用户空间
+
+1. 并且通过一个到用户空间的upcall在用户空间运行handler
+
+1. 在handler中或许会调用mprotect来修改PTE的权限
+
+1. 之后handler返回到内核代码
+
+1. 最后，内核再恢复之前被中断的进程。
+![](./image/MIT6.S081/userleveltrap.png)
+当内核恢复了中断的进程时，如果handler修复了用户程序的地址空间，那么程序指令可以继续正确的运行，如果哪里出错了，那么会通过trap再次回到内核，因为硬件还是不能翻译特定的虚拟内存地址。
+
+## 17.4 构建大的缓存表
+* **缓存表**是用来记录一些运算结果的表单。假设有一个函数f(), 缓存表会存放f(0)到f(n)的结果，将费时的函数运算变为查表。
+* 表单可能会大到超过虚拟内存，我们可以使用论文提到的虚拟内存特性来解决这个问题：
+1. 分配一个大的虚拟地址段用于保存缓存表，但不分配物理内存
+1. 查找表单槽位i导致page fault时，针对对应的虚拟内存地址分配物理内存page，然后计算f(i)的值并储存到表单的第i个槽位tb[i], 之后恢复程序运行
+1. 当page fault handler需要在消耗完所有的内存时，回收一些已经使用过的物理内存page（使用Port1或PortN来修改这些page的权限）
+* 示例代码：
+```c
+int
+main(int argc, char *argv[])
+{
+  page_size = sysconf(_SC_PAGESIZE);
+  printf("page_size is %ld\n", page_size);
+  setup_sqrt_region();  // 从地址空间分配地址段，但是又不实际分配物理Page
+  test_sqrt_region();
+  return 0;
+}
+
+
+static void
+test_sqrt_region(void)
+{
+  int i, pos = rand() % (MAX_SQRTS -1);
+  double correct_sqrt;
+
+  printf("Validating square root table contents...\n");
+  srand(0xDEADBEEF);
+
+  for(i = 0; i < 5000000; i++) {
+    if(i % 2 == 0)
+      pos = rand() % (MAX_SQRTS - 1);
+    else 
+      pos += 1;
+    caculate_sqrts(&correct_sqrt, pos, 1);
+    if(sqrts[pos] != correct_sqrt) {
+      fprintf(stderr, "Square root is incorrect. Expected %f, got %f.\n", 
+              correct_sqrt, sqrts[pos]);
+      exit(EXIT_FAILURE);
+    }
+  }
+  printf("All tests passed!\n");
+}
+
+
+static void setup_sqrt_region(void) {
+  struct sigaction act;
+
+  // Only mapping to find a safe location for the table.
+  sqrts = mmap(NULL, MAX_SQRTS * sizeof(double) + AS_LIMIT, PROT_NONE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (sqrts == MAP_FAILED) {
+    fprintf(stderr, "Couldn't mmap() region for sqrt table; %s\n",
+            strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  // Now release the virtual memory
+  if (munmap(sqrts, MAX_SQRTS * sizeof(double) + AS_LIMIT) == -1) {
+    fprintf(stderr, "Couldn't munmap() region for sqrt table; %s\n",
+            strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  // Register a signal handler to capture SIGSEGV.
+  act.sa_sigaction = handle_sigsegv;
+  act.sa_flags = SA_SIGINFO;
+  sigemptyset(&act.sa_mask);
+  if (sigaction(SIGSEGV, &act, NULL) == -1) {
+    fprintf(stderr, "Couldn't set up SIGSEGV handler; %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+}
+
+
+static void handle_sigsegv(int sig, siginfo_t *si, void *ctx) {
+  uintptr_t fault_addr = (uintptr_t)si->si_addr;
+  double *page_base = (double *)align_down(fault_addr, page_size);
+  static double *last_page_base = NULL;
+
+  if (mmap(page_base, page_size, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
+    fprintf(stderr, "Couldn't mmap(); %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  calculate_sqrts(page_base, page_base - sqrts, page_size / sizeof(double));
+
+  if (last_page_base && munmap(last_page_base, page_size) == -1) {
+    fprintf(stderr, "Couldn't munmap(); %s\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  last_page_base = page_base;
+}
+```
+
+## 17.5 Baker's Real-Time Copying Garbage Collector(GC)
+* GC是指编程语言替程序员完成内存释放，这样程序员就不用像在C语言中一样调用```free```来释放内存。几乎除了C和Rust，其他所有的编程语言都带有GC。
+* 论文中讨论的是一种叫做**copying GC**的GC：将heap分为**from空间**和**to空间**两部分，将活动对象从From空间复制到To空间来实现垃圾收集。Copying GC 是一种 **“停止-复制”算法** ，其主要思想是**将所有存活的对象复制到新区域，旧区域中的垃圾对象则被自动回收**。
+* 改进的**Baker算法**是一种**incremental GC**, 其基本思想是通过**增量和并发**的方式来进行垃圾收集，从而减少程序运行时的长暂停时间。更适用于对响应时间有严格要求的实时系统。
+    1. 增量收集: 每次只处理一小部分对象，从而将垃圾收集的工作分摊到整个程序的执行过程中，避免长时间的程序暂停。
+    1. 并发收集：垃圾收集器可以与程序并发运行，允许程序在垃圾收集过程中继续执行。通过这种方式，程序的响应时间得到改善。
+      
+* 论文对于这里的方案提出了两个问题：
+    1. 第一个是每次解引用（dereference）都需要有**检查对象是否在from空间**的额外步骤，每次解引用不再是对于内存地址的单个load或者store指令，而是多个load或者store指令，这增加了应用程序的开销。
+    1. 第二个问题是并不能容易并行运行GC。如果程序运行在多核CPU的机器上，并且你拥有大量的空闲CPU，我们本来可以将GC运行在后台来遍历对象的图关系，并渐进的拷贝对象。但是如果应用程序也在操作对象，那么这里可能会有抢占。应用程序或许在运行dereference检查并拷贝一个对象，而同时GC也在拷贝这个对象。如果我们不够小心的话，我们可能会将对象拷贝两遍，并且最后指针指向的不是正确的位置。所以这里存在GC和应用程序**race condition**的可能。
+
+## 17.6 使用虚拟内存特性的GC
+* 基本思想：将from空间和to空间再做一次划分，每部分包含scanned和unscanned两个区域。
+![](./image/MIT6.S081/vmcopyGC.png)
+开始GC时，会将根节点对象拷贝到to空间，将unscanned区域的权限设置为NONE，所以应用程序第一次使用根节点，会得到page fault。
+每次deference unscanned区域的指针，都会触发page fualt，进而拷贝一部分内存page。
+
+* 现在只有GC可以访问未被扫描的内存Page，而应用程序不能访问。所以这里提供了自动的并发，应用程序可以运行并完成它的工作，GC也可以完成自己的工作，它们不会互相得罪，因为一旦应用程序访问了一个未被扫描的Page，它就会得到一个Page Fault。而GC也永远不会访问扫描过的Page，所以也永远不会干扰到应用程序。所以这里以近乎零成本获取到了并发性。
+
+* **GC如何访问权限为NONE的unscanned区域**：使用map2。这里我们会将同一个物理内存映射两次，第一次是我们之前介绍的方式，也就是为应用程序进行映射，第二次专门为GC映射。在GC的视角中，我们仍然有from和to空间。在to空间的unscanned区域中，Page具有读写权限。
+![](./image/MIT6.S081/map2.png)
+
+
+## TO BE CONTINUED
 
 # Lab10 mmap
 ## Task mmap (hard)
@@ -8690,3 +8919,421 @@ $ git fetch
 $ git checkout mmap
 $ make clean
 ```
+```mmap```和```munmap```系统调用允许UNIX程序对其地址空间进行详细控制。它们可用于在进程之间共享内存，将文件映射到进程地址空间，并作为用户级页面错误方案的一部分，如本课程中讨论的垃圾收集算法。在本实验室中，您将把```mmap```和```munmap```添加到xv6中，重点关注内存映射文件（memory-mapped files）。
+手册页面（运行```man 2 mmap```）显示了```mmap```的以下声明：
+```sh
+void *mmap(void *addr, size_t length, int prot, int flags,
+           int fd, off_t offset);
+```
+可以通过多种方式调用```mmap```，但本实验只需要与内存映射文件相关的功能子集。您可以假设```addr```始终为零，这意味着内核应该决定映射文件的虚拟地址。```mmap```返回该地址，如果失败则返回```0xffffffffffffffff```。```length```是要映射的字节数；它可能与文件的长度不同。```prot```指示内存是否应映射为可读、可写，and/or可执行的；您可以认为```prot```是```PROT_READ```或```PROT_WRITE```或两者兼有。```flags```要么是```MAP_SHARED```（映射内存的修改应写回文件），要么是```MAP_PRIVATE```（映射内存的修改不应写回文件）。您不必在```flags```中实现任何其他位。```fd```是要映射的文件的打开文件描述符。可以假定```offset```为零（它是要映射的文件的起点）。
+
+允许进程映射同一个```MAP_SHARED```文件而不共享物理页面。
+
+```munmap(addr, length)```应删除指定地址范围内的```mmap```映射。如果进程修改了内存并将其映射为```MAP_SHARED```，则应首先将修改写入文件。```munmap```调用可能只覆盖```mmap```区域的一部分，但您可以认为它取消映射的位置要么在区域起始位置，要么在区域结束位置，要么就是整个区域(但不会在区域中间“打洞”)。
+
+**Your job**
+<span style="background-color:green;">您应该实现足够的```mmap```和```munmap```功能，以使```mmaptest```测试程序正常工作。如果```mmaptest```不会用到某个```mmap```的特性，则不需要实现该特性。</span>
+
+**期望输出**：
+```sh
+$ mmaptest
+mmap_test starting
+test mmap f
+test mmap f: OK
+test mmap private
+test mmap private: OK
+test mmap read-only
+test mmap read-only: OK
+test mmap read/write
+test mmap read/write: OK
+test mmap dirty
+test mmap dirty: OK
+test not-mapped unmap
+test not-mapped unmap: OK
+test mmap two files
+test mmap two files: OK
+mmap_test: ALL OK
+fork_test starting
+fork_test OK
+mmaptest: all tests succeeded
+$ usertests
+usertests starting
+...
+ALL TESTS PASSED
+$
+```
+
+**提示**：
+1. 首先，向```UPROGS```添加```_mmaptest```，以及```mmap```和```munmap```系统调用，以便让***user/mmaptest.c***进行编译。现在，只需从```mmap```和```munmap```返回错误。我们在***kernel/fcntl.h***中为您定义了```PROT_READ```等。运行```mmaptest```，它将在第一次```mmap```调用时失败。
+1. 惰性地填写页表，以响应页错误。也就是说，```mmap```不应该分配物理内存或读取文件。相反，在```usertrap```中（或由```usertrap```调用）的页面错误处理代码中执行此操作，就像在lazy page allocation实验中一样。惰性分配的原因是确保大文件的```mmap```是快速的，并且比物理内存大的文件的```mmap```是可能的。
+1. 跟踪```mmap```为每个进程映射的内容。定义与第15课中描述的VMA（虚拟内存区域）对应的结构体，记录```mmap```创建的虚拟内存范围的地址、长度、权限、文件等。由于xv6内核中没有内存分配器，因此可以声明一个固定大小的VMA数组，并根据需要从该数组进行分配。大小为16应该就足够了。
+1. 实现```mmap```：在进程的地址空间中找到一个未使用的区域来映射文件，并将VMA添加到进程的映射区域表中。VMA应该包含指向映射文件对应```struct file```的指针；```mmap```应该增加文件的引用计数，以便在文件关闭时结构体不会消失（提示：请参阅```filedup```）。运行```mmaptest```：第一次```mmap```应该成功，但是第一次访问被```mmap```的内存将导致页面错误并终止```mmaptest```。
+1. 添加代码以导致在```mmap```的区域中产生页面错误，从而分配一页物理内存，将4096字节的相关文件读入该页面，并将其映射到用户地址空间。使用```readi```读取文件，它接受一个偏移量参数，在该偏移处读取文件（但必须lock/unlock传递给```readi```的索引结点）。不要忘记在页面上正确设置权限。运行```mmaptest```；它应该到达第一个```munmap```。
+1. 实现```munmap```：找到地址范围的VMA并取消映射指定页面（提示：使用```uvmunmap```）。如果```munmap```删除了先前```mmap```的所有页面，它应该减少相应```struct file```的引用计数。如果未映射的页面已被修改，并且文件已映射到```MAP_SHARED```，请将页面写回该文件。查看```filewrite```以获得灵感。
+1. 理想情况下，您的实现将只写回程序实际修改的```MAP_SHARED```页面。RISC-V PTE中的脏位（```D```）表示是否已写入页面。但是，```mmaptest```不检查非脏页是否没有回写；因此，您可以不用看```D```位就写回页面。
+1. 修改```exit```将进程的已映射区域取消映射，就像调用了```munmap```一样。运行```mmaptest```；```mmap_test```应该通过，但可能不会通过```fork_test```。
+1. 修改```fork```以确保子对象具有与父对象相同的映射区域。不要忘记增加VMA的```struct file```的引用计数。在子进程的页面错误处理程序中，可以分配新的物理页面，而不是与父级共享页面。后者会更酷，但需要更多的实施工作。运行```mmaptest```；它应该通过```mmap_test```和```fork_test```。
+
+运行```usertests```以确保一切正常。
+
+**步骤**：
+1. 修改***Makefile***添加```_mmaptest```, 修改***user/usys.pl***、***user/user.h***、***syscall.h***、***syscall.c***和***kernel/sysfile.c***来添加系统调用
+    ```c
+    // usys.pl
+    entry("mmap");
+    entry("munmap");
+
+    // user/user.h
+    // system calls
+    void* mmap(void*, int, int, int, int, int);
+    int munmap(void*, int);
+
+    // syscall.h
+    #define SYS_mmap  22
+    #define SYS_munmap  23
+
+    // syscall.c
+    extern uint64 sys_mmap(void);
+    extern uint64 sys_munmap(void);
+
+    static uint64 (*syscalls[])(void) = {
+    //...
+    [SYS_mmap]   sys_mmap,
+    [SYS_munmap]   sys_munmap,
+    };
+
+    // end of sysfile.c
+    uint64
+    sys_mmap(void)
+    {
+      return 0;
+    }
+
+    uint64
+    sys_munmap(void)
+    {
+      return 0;
+    }
+    ```
+    确保编译成功
+1. 按照提示3和4，定义VMA结构体，记录```mmap```创建的虚拟内存范围的地址、长度、权限、文件等。现代操作系统一般会把VMA放在一种称为“区间树”的结构中来动态创建和管理，用指针等方式间接连接到进程结构体。这里我们直接在进程结构体中创建个数组去存放VMA。 VMA里的内容参照Linux中```mmap```的参数含义：
+    ```c
+    /**
+     * @brief map files or devices into memory
+    * @param addr the address you want map to. 
+                  kernel will choose one if it's null.
+    * @param len the length of fd
+    * @param prot Protrction bit. PROT_NONE/PROT_READ/PROT_WRITE/PROT_EXEC...
+    * @param flags determines whether updates to the mapping are
+                   visible to other processes mapping the same region
+    * @param fd the object you want to map 
+    */
+    void *mmap(void *addr[.len], size_t len, int prot, int flags,
+    int fd, off_t offset) 
+    ```
+    VMA定义：
+    ```c
+    // kernel/proc.h
+    #define NVMA 16  // 每个进程最多允许的VMA数量
+
+    struct vm_area {
+      int used;           // 是否已被使用
+      uint64 addr;        // 起始地址
+      int len;            // 长度
+      int prot;           // 权限
+      int flags;          // 标志位
+      int vfd;            // 对应的文件描述符
+      struct file* vfile; // 对应文件
+      int offset;         // 文件偏移，本实验中一直为0
+    };
+
+    // Per-process state
+    struct proc {
+      //...
+      struct vm_area vma[NVMA];    // Virtual memory areas
+    };
+    ```
+1. 在```allocproc```函数中初始化vma:
+    ```c
+    // kernel/proc.c
+    static struct proc*
+    allocproc(void)
+    {
+      //...
+
+    found:
+      //...
+      // Set up VMA, filled with 0
+      memset(&p->vma, 0, sizeof(p->vma));
+
+      return p;
+    }
+    ```
+1. 下面开始实现```sys_mmap```, 按照提示2，参照lazy lab中的方法，延迟分配物理内存。根据提示4中的描述来更新vma的成员变量, 根据题干设定addr = offset = 0, 返回错误代码0xffffffffffffffff：
+    ```c
+    uint64
+    sys_mmap(void) {
+      uint64 addr;
+      int length;
+      int prot;
+      int flags;
+      int vfd;
+      struct file* vfile;
+      int offset;
+      uint64 err = 0xffffffffffffffff;
+
+      // 获取系统调用参数
+      if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 || argint(2, &prot) < 0 ||
+        argint(3, &flags) < 0 || argfd(4, &vfd, &vfile) < 0 || argint(5, &offset) < 0)
+        return err;
+
+      // 实验提示中假定addr和offset为0，简化程序可能发生的情况
+      if(addr != 0 || offset != 0 || length < 0)
+        return err;
+
+      // 文件不可写则不允许拥有PROT_WRITE权限时映射为MAP_SHARED
+      if(vfile->writable == 0 && (prot & PROT_WRITE) != 0 && flags == MAP_SHARED)
+        return err;
+
+      struct proc* p = myproc();
+      // 没有足够的虚拟地址空间
+      if(p->sz + length > MAXVA)
+        return err;
+
+      // 遍历查找未使用的VMA结构体
+      for(int i = 0; i < NVMA; ++i) {
+        if(p->vma[i].used == 0) {
+          p->vma[i].used = 1;
+          p->vma[i].addr = p->sz;
+          p->vma[i].len = length;
+          p->vma[i].flags = flags;
+          p->vma[i].prot = prot;
+          p->vma[i].vfile = vfile;
+          p->vma[i].vfd = vfd;
+          p->vma[i].offset = offset;
+
+          // 增加文件的引用计数
+          filedup(vfile);
+
+          p->sz += length;
+          return p->vma[i].addr;
+        }
+      }
+
+      return err;
+    }
+    ```
+
+1. 根据提示5修改```usertrap```. page fault的原因参见[对照表](#pagefault_table). 用```ilock```保护对文件的访问。 新函数须在```defs.h```中声明
+    ```c
+    // trap.c
+    #include "sleeplock.h"
+    #include "fs.h"
+    #include "file.h"
+    #include "fcntl.h"
+    //...
+    void
+    usertrap(void)
+    {
+      //...
+      uint64 cause = r_scause();
+      if(cause == 8){
+        //...
+      } else if((which_dev = devintr()) != 0){
+        // ok
+      } 
+      else if(cause == 13 || cause == 15) {
+      #ifdef LAB_MMAP
+        // 读取产生页面故障的虚拟地址，并判断是否位于有效区间
+        uint64 fault_va = r_stval();
+        if(PGROUNDUP(p->trapframe->sp) - 1 < fault_va && fault_va < p->sz) {
+          if(mmap_handler(r_stval(), cause) != 0) p->killed = 1;
+        } else
+          p->killed = 1;
+      #endif
+      }
+      else {
+        //...
+      }
+      //...
+    }
+
+    /**
+     * @brief handler of page faults caused by mmap's lazy allocation
+    * @param va the address of the page fault
+    * @param cause page fault's reason
+    * @return 0 if successful, -1 otherwise
+    */
+    int mmap_handler(int va, int cause) {
+    int i;
+    struct proc* p = myproc();
+    // 根据地址查找属于哪一个VMA
+    for(i = 0; i < NVMA; ++i) {
+      if(p->vma[i].used && p->vma[i].addr <= va && va <= p->vma[i].addr + p->vma[i].len - 1) {
+        break;
+      }
+    }
+    if(i == NVMA)
+      return -1;
+
+    int pte_flags = PTE_U;
+    if(p->vma[i].prot & PROT_READ) pte_flags |= PTE_R;
+    if(p->vma[i].prot & PROT_WRITE) pte_flags |= PTE_W;
+    if(p->vma[i].prot & PROT_EXEC) pte_flags |= PTE_X;
+
+
+    struct file* vf = p->vma[i].vfile;
+    // 读导致的页面错误
+    if(cause == 13 && vf->readable == 0) return -1;
+    // 写导致的页面错误
+    if(cause == 15 && vf->writable == 0) return -1;
+
+    void* pa = kalloc();
+    if(pa == 0)
+      return -1;
+    memset(pa, 0, PGSIZE);
+
+    // 读取文件内容
+    ilock(vf->ip);
+    // 计算当前页面读取文件的偏移量，实验中p->vma[i].offset总是0
+    // 要按顺序读读取，例如内存页面A,B和文件块a,b
+    // 则A读取a，B读取b，而不能A读取b，B读取a
+    int offset = p->vma[i].offset + PGROUNDDOWN(va - p->vma[i].addr);
+    int readbytes = readi(vf->ip, 0, (uint64)pa, offset, PGSIZE);
+    // 什么都没有读到
+    if(readbytes == 0) {
+      iunlock(vf->ip);
+      kfree(pa);
+      return -1;
+    }
+    iunlock(vf->ip);
+
+    // 添加页面映射
+    if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)pa, pte_flags) != 0) {
+      kfree(pa);
+      return -1;
+    }
+
+    return 0;
+    }
+    ```
+
+    尝试编译，运行```mmaptest```：
+    ![](./image/MIT6.S081/mmaptest1.png)
+
+1. 按照提示6来实现```int munmap(void* addr, int length);```, ```munmap```调用可能只覆盖```mmap```区域的一部分，但您可以认为它取消映射的位置要么在区域起始位置，要么在区域结束位置，要么就是整个区域
+    ```c
+    uint64
+    sys_munmap(void)
+    {
+      uint64 addr;
+      int len;
+      // 获取系统调用参数
+      if(argaddr(0, &addr) < 0 || argint(1, &len) < 0)
+        return -1;
+
+      struct proc* p = myproc();
+      int i = 0;
+      // 找到地址范围的VMA，更新VMA中数据
+      for(; i < NVMA; ++i) {
+        if(p->vma[i].used && p->vma[i].len >= len) {
+          if(p->vma[i].addr == addr) {  // 在起始位置/覆盖整个mmap区域
+            p->vma[i].addr += len;  // 右移起始地址
+            p->vma[i].len -= len;
+            break;
+          }
+          else if(p->vma[i].addr + p->vma[i].len == addr + len) {  // 在mmap的结束位置
+            p->vma[i].len -= len;  // 起始地址不变，只改变长度
+            break;
+          }
+          else  // 越界
+            return -1;
+        }
+      }
+      if(i == NVMA)  // didn't found
+        return -1;
+
+      // 如果未映射的页面已被修改，并且文件已映射到MAP_SHARED，将页面写回该文件
+      if(p->vma[i].flags == MAP_SHARED && (p->vma[i].prot & PROT_WRITE) != 0) {
+        filewrite(p->vma[i].vfile, addr, len);
+      }
+
+      // 取消映射指定页面
+      uvmunmap(p->pagetable, PGROUNDUP(addr), len / PGSIZE, 1);
+
+      // 如果munmap删除了先前mmap的所有页面，它应该减少相应struct file的引用计数
+      if(p->vma[i].len == 0) {
+        fileclose(p->vma[i].vfile);
+        p->vma[i].used = 0;  // recollect this vma
+      }
+
+      return 0;
+    }
+    ```
+1. 参照lazy lab, 修改***vm.c***中的```uvmcopy```和```uvmunmap```, 取消掉访问PTE_V未设置的页表项时的panic
+    ```c
+    if((*pte & PTE_V) == 0)
+      // panic("uvmcopy: page not present");
+      continue;
+    ```
+1. 修改```exit```将进程的已映射区域取消映射:
+    ```c
+    // proc.c
+    #include "fcntl.h"
+    //...
+    void
+    exit(int status)
+    {
+      struct proc *p = myproc();
+
+      if(p == initproc)
+        panic("init exiting");
+
+      // Close all open files.
+      for(int fd = 0; fd < NOFILE; fd++){
+        //...
+      }
+
+      // 将进程的已映射区域取消映射
+        for(int i = 0; i < NVMA; ++i) {
+        if(p->vma[i].used) {
+          // 确保退出后其他进程能看见对文件中的修改
+          if(p->vma[i].flags == MAP_SHARED && (p->vma[i].prot & PROT_WRITE) != 0) {
+            filewrite(p->vma[i].vfile, p->vma[i].addr, p->vma[i].len);
+          }
+          fileclose(p->vma[i].vfile);
+          uvmunmap(p->pagetable, p->vma[i].addr, p->vma[i].len / PGSIZE, 1);
+          p->vma[i].used = 0;
+        }
+      }
+
+      begin_op();
+      //...
+    ```
+    编译并测试：
+    ![](./image/MIT6.S081/mmaptest2.png)
+1. 修改```fork```以确保子对象具有与父对象相同的映射区域。增加VMA的```struct file```的引用计数。
+    ```c
+    int
+    fork(void)
+    {
+      //...
+      np->cwd = idup(p->cwd);
+
+      // copy VMA
+      for(i = 0; i < NVMA; i++) {
+        if(p->vma[i].used) {
+          memmove(&np->vma[i], &p->vma[i], sizeof(p->vma[i]));
+          filedup(p->vma[i].vfile); 
+        }
+      }
+
+      safestrcpy(np->name, p->name, sizeof(p->name));
+      //...
+    ```
+
+**测试结果**：
+mmaptest:
+![](./image/MIT6.S081/mmaptest3.png)
+usertests:
+![](./image/MIT6.S081/mmap_usr.png)
